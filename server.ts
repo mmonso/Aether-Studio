@@ -941,6 +941,41 @@ function getSupabaseAdmin() {
   });
 }
 
+/**
+ * Dispara o rebuild do blog na Vercel.
+ *
+ * O blog virou um site estático: o HTML de cada artigo é gerado no build,
+ * lendo o Supabase. Gravar a linha no banco, portanto, não coloca mais nada
+ * no ar sozinho — é este gancho que fecha o ciclo.
+ *
+ * Sem `VERCEL_DEPLOY_HOOK_URL` configurada, publicar continua funcionando; o
+ * artigo só entra no ar no próximo deploy. A resposta diz qual dos dois casos
+ * aconteceu, para o Studio não prometer o que não fez.
+ */
+async function triggerBlogRebuild(): Promise<{ triggered: boolean; detail: string }> {
+  const hookUrl = process.env.VERCEL_DEPLOY_HOOK_URL;
+
+  if (!hookUrl) {
+    return {
+      triggered: false,
+      detail:
+        'Nenhum deploy hook configurado (VERCEL_DEPLOY_HOOK_URL). O artigo entra no ar no próximo deploy do blog.',
+    };
+  }
+
+  try {
+    const response = await fetch(hookUrl, { method: 'POST' });
+    if (!response.ok) throw new Error(`a Vercel respondeu HTTP ${response.status}`);
+    return { triggered: true, detail: 'Rebuild do blog disparado na Vercel (leva cerca de um minuto).' };
+  } catch (err: any) {
+    console.warn('[Deploy hook] Falhou:', err.message);
+    return {
+      triggered: false,
+      detail: `O artigo foi salvo, mas o rebuild não foi disparado (${err.message}). Rode um deploy manual na Vercel.`,
+    };
+  }
+}
+
 function slugify(text: string): string {
   return String(text || '')
     .toLowerCase()
@@ -1094,13 +1129,20 @@ app.post('/api/supabase/publish', async (req, res) => {
       return res.status(400).json({ success: false, error: error.message });
     }
 
+    // Rascunho não muda o site: nada a reconstruir.
+    const rebuild =
+      status === 'published'
+        ? await triggerBlogRebuild()
+        : { triggered: false, detail: 'Rascunho não vai para o ar.' };
+
     res.json({
       success: true,
       message:
         status === 'published'
-          ? 'Artigo publicado! Já está no ar no blog.'
+          ? `Artigo publicado. ${rebuild.detail}`
           : 'Artigo salvo como rascunho — ainda não aparece no blog.',
       slug,
+      rebuildTriggered: rebuild.triggered,
       record: data,
     });
   } catch (error: any) {
@@ -1129,9 +1171,14 @@ app.post('/api/supabase/unpublish', async (req, res) => {
       return res.status(400).json({ success: false, error: error.message });
     }
 
+    // Enquanto o rebuild não roda, a página estática do artigo continua
+    // publicada. Despublicar de verdade exige reconstruir o site.
+    const rebuild = await triggerBlogRebuild();
+
     res.json({
       success: true,
-      message: 'Artigo removido do ar. O registro continua salvo como rascunho.',
+      message: `Artigo marcado como rascunho. ${rebuild.detail}`,
+      rebuildTriggered: rebuild.triggered,
       record: data,
     });
   } catch (error: any) {

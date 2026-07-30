@@ -101,7 +101,7 @@ export const ManifestoEditor: React.FC<ManifestoEditorProps> = ({ manifesto, onS
           <button
             type="button"
             onClick={() => {
-              if (window.confirm('Deseja carregar a Identidade Clínica e Intelectual padrão completa?')) {
+              if (window.confirm('Deseja carregar a linha editorial padrão completa?')) {
                 setFormData(DEFAULT_USER_MANIFESTO);
               }
             }}
@@ -148,7 +148,7 @@ export const ManifestoEditor: React.FC<ManifestoEditorProps> = ({ manifesto, onS
             </label>
             <input
               type="text"
-              placeholder="Ex: Psicóloga Clínica • CRP 06/12345"
+              placeholder="Ex: Engenheira de Software • Arquitetura de Sistemas"
               value={formData.professionalTitle}
               onChange={(e) => setFormData({ ...formData, professionalTitle: e.target.value })}
               className="w-full px-3.5 py-2.5 bg-white dark:bg-[#121110] border border-[#e0dad0] dark:border-[#2a2724] rounded text-stone-900 dark:text-stone-100 text-sm font-normal focus:outline-none focus:border-stone-500"

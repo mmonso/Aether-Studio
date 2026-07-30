@@ -208,7 +208,7 @@ export const VirtualTeamInfo: React.FC<VirtualTeamInfoProps> = ({
         </div>
 
         <p className="text-stone-300 text-xs sm:text-sm leading-relaxed">
-          Muitos leitores percebem quando um texto é editado por IA porque ele fica parecendo uma colcha de retalhos com parágrafos desalinhados. No PsicoContent Studio, adotamos a regra da <strong>Reescrita Integrada pelo Redator Principal</strong>:
+          Muitos leitores percebem quando um texto é editado por IA porque ele fica parecendo uma colcha de retalhos com parágrafos desalinhados. No Aether Studio, adotamos a regra da <strong>Reescrita Integrada pelo Redator Principal</strong>:
         </p>
 
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 pt-2 text-xs">

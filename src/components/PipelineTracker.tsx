@@ -51,7 +51,7 @@ export const PipelineTracker: React.FC<PipelineTrackerProps> = ({
       title: 'Etapa 2: Comitê de Especialistas & Reescrita Unificada',
       agent: isNewsMode
         ? 'Auditor de Fact-Checking • Des-AIzador • Revisor Editorial • Redator'
-        : 'Des-AIzador • Guardião da Teoria • Revisor Clínico • Redator Principal',
+        : 'Des-AIzador • Guardião do Conteúdo • Revisor Editorial • Redator Principal',
       icon: ShieldCheck,
       description: 'Análise de humanização de ritmo, rigor conceitual e postura ética, com reescrita integrada e coesa pelo Redator...',
       hasData: !!reviewResult,

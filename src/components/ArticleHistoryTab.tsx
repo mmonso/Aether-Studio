@@ -74,7 +74,7 @@ export const ArticleHistoryTab: React.FC<ArticleHistoryTabProps> = ({
             <h2>Histórico de Artigos ({posts.length})</h2>
           </div>
           <p className="text-xs sm:text-sm text-stone-600 dark:text-stone-400 mt-1">
-            Organize por temas (Ansiedade, Luto, Clínica, Relacionamentos), edite diretamente ou exporte em PDF.
+            Organize por temas, edite diretamente ou exporte em PDF.
           </p>
         </div>
 

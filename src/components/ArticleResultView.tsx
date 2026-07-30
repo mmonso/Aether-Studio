@@ -322,7 +322,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
   const handleDownloadPDF = () => {
     const manifesto = getStoredManifesto();
     const authorName = manifesto.authorName || post.authorName || 'Psicólogo(a)';
-    const professionalTitle = manifesto.professionalTitle || 'Psicologia & Autoconhecimento';
+    const professionalTitle = manifesto.professionalTitle || 'Tecnologia & Engenharia de Software';
     const title = editedTitle || post.review?.revisedTitle || post.draft?.title || post.topic;
     const subtitle = editedSubtitle || post.review?.revisedSubtitle || post.draft?.subtitle || '';
     const text = editedText || post.review?.revisedText || post.draft?.rawText || '';
@@ -400,7 +400,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
             <div class="author-info">${professionalTitle}</div>
           </div>
           <div style="text-align:right; font-size:12px; color:#57534e;">
-            PsicoContent Studio<br>${dateStr}
+            Aether Studio<br>${dateStr}
           </div>
         </div>
 
@@ -497,7 +497,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
   };
 
   const downloadArticle = () => {
-    const title = editedTitle || post.review?.revisedTitle || post.draft?.title || 'artigo_psicologia';
+    const title = editedTitle || post.review?.revisedTitle || post.draft?.title || 'artigo';
     const text = editedText || post.review?.revisedText || post.draft?.rawText || '';
     const content = `# ${title}\n\n${editedSubtitle || post.review?.revisedSubtitle || ''}\n\nTom / Estilo: ${post.tone}\n\n---\n\n${text}\n\n---\n*Nota Editorial: Conteúdo autoral e reflexivo produzido para publicação no Studio Editorial.*`;
 
@@ -677,9 +677,12 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
           >
             <SearchCheck className="w-4 h-4 text-amber-600 dark:text-amber-400" />
             <span>Fact-Checking & Fontes</span>
-            <span className="bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase border border-amber-300 dark:border-amber-800">
-              {post.factCheck.credibilityScore}%
-            </span>
+            {/* O selo só existe quando houve apuração real com fontes consultadas. */}
+            {post.factCheck.groundingUsed && post.factCheck.credibilityScore !== null && (
+              <span className="bg-amber-100 dark:bg-amber-950/80 text-amber-900 dark:text-amber-200 text-[9px] font-bold px-1.5 py-0.5 rounded-full uppercase border border-amber-300 dark:border-amber-800">
+                {post.factCheck.credibilityScore}%
+              </span>
+            )}
           </button>
         )}
 
@@ -692,7 +695,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
           }`}
         >
           <ShieldCheck className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-          <span>Parecer do Revisor Clínico</span>
+          <span>Parecer do Comitê Editorial</span>
         </button>
 
         <button
@@ -757,7 +760,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
             <div className="bg-amber-50 border border-amber-200 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-amber-950">
               <div className="flex items-center space-x-2">
                 <AlertCircle className="w-5 h-5 text-amber-600 shrink-0" />
-                <span>Você está visualizando o rascunho original produzido pelo Redator Virtual antes da revisão clínica.</span>
+                <span>Você está visualizando o rascunho original produzido pelo Redator Virtual antes da revisão do comitê editorial.</span>
               </div>
               <button
                 onClick={handleRestoreDraftAsRevised}
@@ -1380,7 +1383,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
                   <h2>Gerador de Carrossel (5-8 Slides) & Roteiro de Vídeo/Reels</h2>
                 </div>
                 <p className="text-xs text-stone-600 mt-1">
-                  Transforme o ensaio de psicologia em slides dinâmicos para Instagram/LinkedIn e em roteiro de 60s para vídeo.
+                  Transforme o artigo técnico em slides dinâmicos para Instagram/LinkedIn e em roteiro de 60s para vídeo.
                 </p>
               </div>
 
@@ -1763,7 +1766,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
             <div className="flex items-center space-x-3 p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl">
               <Check className="w-5 h-5 text-emerald-600 shrink-0" />
               <div className="text-xs text-emerald-900">
-                <span className="font-bold">Filtro Ético & Prática Clínica Aprovados</span>
+                <span className="font-bold">Filtro Ético & Rigor Editorial Aprovados</span>
                 <p className="text-emerald-800 mt-0.5">{post.review.ethicsDetails}</p>
               </div>
             </div>
@@ -1792,11 +1795,11 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
                 </p>
               </div>
 
-              {/* Report 3: Revisor Clínico */}
+              {/* Report 3: Revisor Editorial */}
               <div className="bg-indigo-50/50 border border-indigo-200 rounded-2xl p-4 space-y-2">
                 <div className="flex items-center space-x-2 text-indigo-950 font-bold text-xs sm:text-sm">
                   <ShieldCheck className="w-4 h-4 text-indigo-700 shrink-0" />
-                  <span>Revisor Clínico & Ético</span>
+                  <span>Revisor Editorial & Ético</span>
                 </div>
                 <p className="text-xs text-stone-800 leading-relaxed font-sans">
                   {post.review.clinicalNotes}
@@ -1970,7 +1973,7 @@ export const ArticlePostComponent: React.FC<ArticleProps> = ({
   readTimeMinutes = ${post.review?.readingTimeMinutes || 4},
   authorName = ${JSON.stringify(manifesto.authorName || 'Psicólogo(a)')},
   coverImageUrl = ${JSON.stringify(displayedCoverUrl)},
-  tags = ${JSON.stringify(post.tags || post.review?.suggestedTags || ['Psicologia', 'Ensaio'])},
+  tags = ${JSON.stringify(post.tags || post.review?.suggestedTags || ['Tecnologia', 'Artigo'])},
 }) => {
   return (
     <article className="max-w-3xl mx-auto px-4 py-8 font-sans text-stone-800">
@@ -2197,9 +2200,19 @@ ${displayedText}
             <div className="bg-gradient-to-r from-amber-900 via-stone-900 to-amber-950 text-white rounded-2xl p-6 border border-amber-800/40 shadow-md flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div className="space-y-2">
                 <div className="flex items-center space-x-2">
-                  <span className="bg-amber-800/80 border border-amber-600/50 text-amber-200 text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider flex items-center space-x-1">
-                    <SearchCheck className="w-3 h-3 text-amber-300" />
-                    <span>Dossiê Anti-Fake News • Google Grounding</span>
+                  <span
+                    className={`text-[10px] font-bold px-2.5 py-0.5 rounded-full uppercase tracking-wider flex items-center space-x-1 border ${
+                      post.factCheck.groundingUsed
+                        ? 'bg-amber-800/80 border-amber-600/50 text-amber-200'
+                        : 'bg-stone-800/80 border-stone-600/50 text-stone-300'
+                    }`}
+                  >
+                    <SearchCheck className="w-3 h-3" />
+                    <span>
+                      {post.factCheck.groundingUsed
+                        ? `Apurado na web • ${post.factCheck.sources.length} fonte(s) consultada(s)`
+                        : 'Sem apuração na web'}
+                    </span>
                   </span>
                   <span className="text-stone-400 text-xs">• Checado em {new Date(post.factCheck.checkedAt).toLocaleDateString('pt-BR')}</span>
                 </div>
@@ -2211,16 +2224,31 @@ ${displayedText}
                 </p>
               </div>
 
-              <div className="bg-amber-950/80 border border-amber-700/60 p-4 rounded-xl text-center shrink-0 min-w-[140px]">
-                <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300 block">Índice de Certeza</span>
-                <span className="text-3xl font-extrabold text-amber-400 font-mono">{post.factCheck.credibilityScore}%</span>
-                <div className="w-full bg-amber-950 h-2 rounded-full mt-1.5 overflow-hidden border border-amber-800">
-                  <div
-                    className="bg-amber-400 h-full rounded-full transition-all duration-500"
-                    style={{ width: `${post.factCheck.credibilityScore}%` }}
-                  />
+              {post.factCheck.groundingUsed && post.factCheck.credibilityScore !== null ? (
+                <div className="bg-amber-950/80 border border-amber-700/60 p-4 rounded-xl text-center shrink-0 min-w-[140px]">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-amber-300 block">
+                    Solidez da Apuração
+                  </span>
+                  <span className="text-3xl font-extrabold text-amber-400 font-mono">
+                    {post.factCheck.credibilityScore}%
+                  </span>
+                  <div className="w-full bg-amber-950 h-2 rounded-full mt-1.5 overflow-hidden border border-amber-800">
+                    <div
+                      className="bg-amber-400 h-full rounded-full transition-all duration-500"
+                      style={{ width: `${post.factCheck.credibilityScore}%` }}
+                    />
+                  </div>
                 </div>
-              </div>
+              ) : (
+                <div className="bg-stone-900/80 border border-stone-700/60 p-4 rounded-xl text-center shrink-0 max-w-[220px]">
+                  <span className="text-[10px] font-bold uppercase tracking-wider text-stone-400 block mb-1">
+                    Sem nota de credibilidade
+                  </span>
+                  <span className="text-[11px] text-stone-400 leading-snug block">
+                    Não houve apuração na web. Trate as afirmações do texto como não verificadas.
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Verified Facts vs Unverified Claims Grid */}

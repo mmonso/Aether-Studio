@@ -82,7 +82,7 @@ app.post('/api/generate-topics', async (req, res) => {
     const bNiche = blogNiche || 'Conteúdo Especializado & Artigos';
     const authorName = userManifesto?.authorName || 'Autor(a) do Blog';
     const worldview = userManifesto?.worldviewDescription || 'Visão autoral e aprofundada do tema';
-    const authorTone = userManifesto?.toneOfVoice || 'Acolhedor, informativo e reflexivo';
+    const authorTone = userManifesto?.toneOfVoice || 'Analítico, informativo e reflexivo';
     const targetAudience = userManifesto?.targetAudienceDescription || 'Leitores interessados no tema';
     const favKeywords = userManifesto?.favoriteKeywords?.join(', ') || 'Rigor, clareza, autenticidade';
     const probTerms = userManifesto?.prohibitedTerms?.join(', ') || 'Clichês e promessas superficiais';
@@ -165,66 +165,147 @@ ${category ? `Categoria ou eixo de interesse: "${category}".` : ''}`;
   }
 });
 
-// 0.5. PESQUISADOR & FACT-CHECKER: Pesquisa em tempo real com Google Search grounding e verificação anti-fake news
+// 0.5. PESQUISADOR & FACT-CHECKER
+//
+// Integridade acima de conveniência: este endpoint só devolve um dossiê quando
+// houve pesquisa real na web. Se a busca não acontecer, ele FALHA — e o
+// pipeline segue sem fact-check, sem selo e sem nota. Um dossiê inventado é
+// pior que dossiê nenhum, porque vira instrução de veracidade para o redator
+// e vira selo de credibilidade para o leitor.
+//
+// A busca e a estruturação são duas chamadas separadas de propósito: a API do
+// Gemini não aceita `tools` junto com `responseSchema`, e a tentativa anterior
+// de combinar os dois fazia toda apuração cair silenciosamente para um modelo
+// sem acesso à web, respondendo de memória.
+
+interface GroundingSource {
+  title: string;
+  sourceName: string;
+  url?: string;
+  reliability: string;
+  snippet?: string;
+}
+
+// Extrai as fontes que o Google Search realmente consultou.
+function extractGroundingSources(response: any): GroundingSource[] {
+  const chunks = response?.candidates?.[0]?.groundingMetadata?.groundingChunks;
+  if (!Array.isArray(chunks)) return [];
+
+  return chunks
+    .map((chunk: any) => {
+      const web = chunk?.web;
+      if (!web?.uri) return null;
+      let sourceName = web.domain || '';
+      if (!sourceName) {
+        try {
+          sourceName = new URL(web.uri).hostname.replace(/^www\./, '');
+        } catch {
+          sourceName = 'Fonte web';
+        }
+      }
+      return {
+        title: web.title || sourceName,
+        sourceName,
+        url: web.uri,
+        reliability: 'verificada',
+      };
+    })
+    .filter(Boolean) as GroundingSource[];
+}
+
 app.post('/api/research-factcheck', async (req, res) => {
+  const { topic, newsReferenceUrl, blogName, blogNiche } = req.body;
+
+  if (!topic) {
+    return res.status(400).json({ success: false, error: 'Tema não informado.' });
+  }
+
+  const bName = blogName || 'Blog Editorial';
+  const bNiche = blogNiche || 'Tecnologia e Inovação';
+
+  const researchSystemPrompt = `Você é o PESQUISADOR E CHECADOR DE FATOS do blog "${bName}" (nicho: ${bNiche}).
+Use a busca do Google para levantar fatos recentes, verificáveis e atribuíveis sobre o tema.
+
+REGRAS:
+1. Só afirme o que encontrar nas fontes consultadas. Não complete lacunas com conhecimento próprio.
+2. Registre números, datas, versões e nomes próprios exatamente como aparecem na fonte.
+3. Separe o que está confirmado do que é rumor, especulação de mercado ou anúncio não verificado.
+4. Se as fontes divergirem, diga que divergem e mostre as duas versões.
+5. Se não encontrar material confiável sobre algum ponto, diga isso explicitamente.`;
+
+  const researchPrompt = `Pesquise e cheque os fatos sobre: "${topic}".${
+    newsReferenceUrl ? `\nReferência fornecida pelo autor: ${newsReferenceUrl}` : ''
+  }`;
+
   try {
     const ai = getGeminiClient();
-    const { topic, newsReferenceUrl, blogName, blogNiche, userManifesto } = req.body;
 
-    const bName = blogName || 'Blog Noticioso & Editorial';
-    const bNiche = blogNiche || 'Notícias e Atualidades';
+    // --- Etapa 1: pesquisa com Google Search (sem schema) --------------------
+    let researchText = '';
+    let groundingSources: GroundingSource[] = [];
 
-    const systemPrompt = `Você é o PESQUISADOR VIRTUAL & CHECADOR DE FATOS SÊNIOR (Fact-Checker Anti-Fake News) do blog "${bName}" (Nicho: ${bNiche}).
-Sua missão é realizar uma pesquisa jornalística atualizada em tempo real (utilizando a ferramenta Google Search) e elaborar um DOSSIÊ DE VERIFICAÇÃO DE FATOS rigoroso sobre o tema.
+    try {
+      const searchResponse = await callGeminiWithRetry(() =>
+        ai.models.generateContent({
+          model: 'gemini-3.6-flash',
+          contents: researchPrompt,
+          config: {
+            systemInstruction: researchSystemPrompt,
+            tools: [{ googleSearch: {} }],
+          },
+        })
+      );
 
-=== DIRETRIZES DE FACT-CHECKING ===
-1. Busque fatos reais recentes, dados estatísticos, nomes de órgãos oficiais, datas e declarações confirmadas sobre o assunto.
-2. Identifique e alerte contra boatos, informações não checadas, rumores de redes sociais ou fake news.
-3. Classifique a confiabilidade das informações e apresente as principais fontes de imprensa ou relatórios oficiais.
-4. Mantenha isenção absoluta, postura jornalística e apuração criteriosa.`;
+      researchText = searchResponse.text || '';
+      groundingSources = extractGroundingSources(searchResponse);
+    } catch (searchError: any) {
+      console.error('[Fact-check] A busca falhou:', searchError.message);
+      return res.status(502).json({
+        success: false,
+        groundingUsed: false,
+        error:
+          'A pesquisa na web falhou, então não há como checar os fatos. O artigo pode ser escrito sem fact-check, mas não receberá selo de verificação.',
+      });
+    }
 
-    const userPrompt = `Por favor, faça a pesquisa ao vivo e a checagem de fatos completa para o tema: "${topic}" ${
-      newsReferenceUrl ? `(URL/Referência fornecida pelo usuário: ${newsReferenceUrl})` : ''
-    }.`;
+    // Sem fontes consultadas não houve apuração — o modelo respondeu de memória.
+    if (groundingSources.length === 0) {
+      console.warn('[Fact-check] Resposta sem grounding: nenhuma fonte foi consultada.');
+      return res.status(422).json({
+        success: false,
+        groundingUsed: false,
+        error:
+          'O modelo respondeu sem consultar nenhuma fonte na web. Sem apuração real, o dossiê seria apenas memória do modelo — nenhum selo de verificação será emitido.',
+      });
+    }
 
-    const factCheckSchema = {
+    // --- Etapa 2: estruturar o que foi apurado (sem tools) -------------------
+    const structureSchema = {
       type: Type.OBJECT,
       properties: {
         researchSummary: {
           type: Type.STRING,
-          description: 'Resumo analítico dos fatos reais mais recentes e confirmados',
+          description: 'Resumo analítico dos fatos apurados, fiel ao material pesquisado',
         },
         credibilityScore: {
           type: Type.NUMBER,
-          description: 'Nota de confiabilidade dos fatos de 0 a 100%',
+          description:
+            'De 0 a 100: quão sólida é a apuração, considerando quantidade e qualidade das fontes e convergência entre elas. Seja rigoroso — 100 exige múltiplas fontes primárias concordantes.',
         },
         verifiedFacts: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Lista de fatos comprovados e dados concretos apurados',
+          description: 'Fatos sustentados pelas fontes pesquisadas, com números e datas',
         },
         unverifiedClaimsOrRumors: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: 'Lista de boatos, dados falsos ou teses sem confirmação que DEVEM ser evitadas',
-        },
-        sources: {
-          type: Type.ARRAY,
-          items: {
-            type: Type.OBJECT,
-            properties: {
-              title: { type: Type.STRING, description: 'Título do artigo/notícia de origem' },
-              sourceName: { type: Type.STRING, description: 'Nome do veículo de imprensa ou órgão oficial' },
-              url: { type: Type.STRING, description: 'Link ou referência da fonte se disponível' },
-              reliability: { type: Type.STRING, description: 'Grau de confiabilidade: alta, media ou verificada' },
-              snippet: { type: Type.STRING, description: 'Trecho chave checado' },
-            },
-            required: ['title', 'sourceName', 'reliability'],
-          },
+          description: 'Rumores, especulações e afirmações sem confirmação que o texto deve evitar',
         },
         verdict: {
           type: Type.STRING,
-          description: 'Veredito final do Fact-Checker: Verificado e Confiável, Requer Cautela, ou Informação Parcial ou em Atualização',
+          description:
+            'Um de: "Verificado e Confiável", "Requer Cautela", "Informação Parcial ou em Atualização"',
         },
       },
       required: [
@@ -232,95 +313,69 @@ Sua missão é realizar uma pesquisa jornalística atualizada em tempo real (uti
         'credibilityScore',
         'verifiedFacts',
         'unverifiedClaimsOrRumors',
-        'sources',
         'verdict',
       ],
     };
 
-    let response;
-    try {
-      // Attempt 1: Search grounding without long retry delay if rate limited
-      response = await ai.models.generateContent({
-        model: 'gemini-3.6-flash',
-        contents: userPrompt,
-        config: {
-          systemInstruction: systemPrompt,
-          tools: [{ googleSearch: {} }],
-          responseMimeType: 'application/json',
-          responseSchema: factCheckSchema,
-        },
+    const structurePrompt = `Organize a apuração abaixo no formato solicitado. Não acrescente nenhum fato que não esteja no material.
+
+TEMA: ${topic}
+
+MATERIAL APURADO NA WEB:
+${researchText}
+
+FONTES CONSULTADAS:
+${groundingSources.map((s) => `- ${s.sourceName}: ${s.title}`).join('\n')}`;
+
+    const structureCall = (mName: string) =>
+      ai.models.generateContent({
+        model: mName,
+        contents: structurePrompt,
+        config: { responseMimeType: 'application/json', responseSchema: structureSchema },
       });
-    } catch (searchError: any) {
-      console.warn('Google Search Grounding disabled or limit reached, falling back to base model verification');
-      try {
-        // Attempt 2: Fallback without search tool using retry helper
-        response = await callGeminiWithRetry(() =>
-          ai.models.generateContent({
-            model: 'gemini-3.6-flash',
-            contents: userPrompt,
-            config: {
-              systemInstruction: systemPrompt,
-              responseMimeType: 'application/json',
-              responseSchema: factCheckSchema,
-            },
-          })
-        );
-      } catch (fallbackError: any) {
-        console.warn('Base model gemini-3.6-flash fallback, trying gemini-3.1-flash-lite');
-        response = await callGeminiWithRetry(() =>
-          ai.models.generateContent({
-            model: 'gemini-3.1-flash-lite',
-            contents: userPrompt,
-            config: {
-              systemInstruction: systemPrompt,
-              responseMimeType: 'application/json',
-              responseSchema: factCheckSchema,
-            },
-          }),
-          2,
-          500
-        );
-      }
+
+    let structured;
+    try {
+      structured = await callGeminiWithRetry(() => structureCall('gemini-3.6-flash'));
+    } catch (e) {
+      console.warn('[Fact-check] Estruturação com flash falhou, tentando flash-lite...');
+      structured = await callGeminiWithRetry(() => structureCall('gemini-3.1-flash-lite'), 2, 500);
     }
 
-    const parsed = JSON.parse(response.text || '{}');
+    const parsed = JSON.parse(structured.text || '{}');
+
+    if (!parsed.researchSummary || !Array.isArray(parsed.verifiedFacts)) {
+      return res.status(502).json({
+        success: false,
+        groundingUsed: true,
+        error: 'A apuração retornou em formato inesperado e foi descartada.',
+      });
+    }
+
     res.json({
       success: true,
       data: {
-        researchSummary: parsed.researchSummary || 'Pesquisa realizada com sucesso.',
-        credibilityScore: typeof parsed.credibilityScore === 'number' ? parsed.credibilityScore : 95,
-        verifiedFacts: parsed.verifiedFacts || [],
+        researchSummary: parsed.researchSummary,
+        // Sem default: a nota vem da apuração ou não existe.
+        credibilityScore:
+          typeof parsed.credibilityScore === 'number'
+            ? Math.max(0, Math.min(100, parsed.credibilityScore))
+            : null,
+        verifiedFacts: parsed.verifiedFacts,
         unverifiedClaimsOrRumors: parsed.unverifiedClaimsOrRumors || [],
-        sources: parsed.sources || [],
+        sources: groundingSources,
+        groundingUsed: true,
         checkedAt: new Date().toISOString(),
-        verdict: parsed.verdict || 'Verificado e Confiável',
+        verdict: parsed.verdict || 'Informação Parcial ou em Atualização',
       },
     });
   } catch (error: any) {
-    console.error('Error in research-factcheck:', error);
-    // Graceful fallback response so the frontend pipeline does not crash
-    res.json({
-      success: true,
-      data: {
-        researchSummary: `Dossiê editorial elaborado para o tema: "${req.body.topic}". A apuração fundamentou-se no acervo do blog e nas diretrizes éticas e conceituais do autor.`,
-        credibilityScore: 92,
-        verifiedFacts: [
-          `Tema pertinente e condizente com a linha editorial do blog ${req.body.blogName || ''}.`,
-          `Rigor conceitual e veracidade preservados com base nos princípios do autor.`,
-        ],
-        unverifiedClaimsOrRumors: [
-          `Evitar generalizações, sensacionalismo e promessas sem embasamento.`,
-        ],
-        sources: [
-          {
-            title: `Diretriz Editorial de ${req.body.blogName || 'Studio Editorial'}`,
-            sourceName: 'Acervo e Base Autoral',
-            reliability: 'verificada',
-          },
-        ],
-        checkedAt: new Date().toISOString(),
-        verdict: 'Verificado (Base Editorial)',
-      },
+    console.error('[Fact-check] Erro:', error);
+    // Sem dossiê de consolação. Falhou é falhou.
+    res.status(500).json({
+      success: false,
+      groundingUsed: false,
+      error: error.message || 'Falha na checagem de fatos.',
     });
   }
 });
@@ -473,7 +528,7 @@ ${customWriterPrompt ? `\nINSTRUÇÕES ADICIONAIS DO USUÁRIO:\n${customWriterPr
   }
 });
 
-// 2. REVISOR CLÍNICO & EDITORIAL: Revisa e Polir o Artigo + Parecer Ético/Qualidade segundo a Visão de Mundo
+// 2. COMITÊ EDITORIAL: Revisa e Pole o Artigo o Artigo + Parecer Ético/Qualidade segundo a Visão de Mundo
 app.post('/api/review-draft', async (req, res) => {
   try {
     const ai = getGeminiClient();
@@ -552,8 +607,8 @@ ${draftText}`;
         revisedSubtitle: { type: Type.STRING, description: 'Subtítulo final refinado' },
         revisedText: { type: Type.STRING, description: 'Texto completamente reescrito e unificado pelo Redator Principal em Markdown, sem clichês, marcas de IA ou "você"' },
         humanizationNotes: { type: Type.STRING, description: 'Parecer do Editor de Humanização: marcas de IA expurgadas, conectores cortados e ritmo oxigenado' },
-        conceptualNotes: { type: Type.STRING, description: 'Parecer do Curador Conceitual: alinhamento com a visão de mundo, Espinosa, Gestalt e fenomenologia' },
-        clinicalNotes: { type: Type.STRING, description: 'Parecer do Revisor Clínico: adequação ética, ausência de conselhos de autoajuda e limites da prática' },
+        conceptualNotes: { type: Type.STRING, description: 'Parecer do Curador Conceitual: precisão dos termos técnicos, profundidade da análise e alinhamento com a linha editorial do blog' },
+        clinicalNotes: { type: Type.STRING, description: 'Parecer do Revisor Editorial: adequação ética, isenção ao avaliar ferramentas e ausência de afirmações sem embasamento' },
         writerSynthesisNotes: { type: Type.STRING, description: 'Explicativo do Redator Principal sobre como fundiu as orientações dos especialistas em uma prosa única e coesa' },
         ethicsCheckPassed: { type: Type.BOOLEAN },
         ethicsDetails: { type: Type.STRING, description: 'Comentários sobre a adequação ética e recusa de diagnósticos rasos' },
@@ -563,7 +618,7 @@ ${draftText}`;
         suggestedTags: {
           type: Type.ARRAY,
           items: { type: Type.STRING },
-          description: '2 a 4 tags temáticas para categorização (ex: Ansiedade, Luto, Relacionamentos, Clínica, Existencialismo, Depressão, Autoestima, Vínculos)',
+          description: '2 a 4 tags temáticas extraídas do próprio conteúdo do artigo, no vocabulário do nicho do blog. Use termos que um leitor buscaria.',
         },
         keyTakeaways: { type: Type.ARRAY, items: { type: Type.STRING } },
         readingTimeMinutes: { type: Type.NUMBER },
@@ -627,14 +682,14 @@ app.post('/api/generate-image', async (req, res) => {
     let conceptDesc = '';
     let altTextDesc = '';
 
-    const imageCraftPrompt = `Gere um prompt em inglês conciso e límpido (máximo 25 palavras) para um gerador de imagem editorial de psicologia:
+    const imageCraftPrompt = `Gere um prompt em inglês conciso e límpido (máximo 25 palavras) para um gerador de imagem editorial de tecnologia:
 TÍTULO: ${title}
 RESUMO: ${summary}
 ESTILO VISUAL: ${visualStyle} (${promptModifier})
 ${customImagePrompt ? `DIRETRIZ EXTRA: ${customImagePrompt}` : ''}
 
 DIRETRIZES DE CRIAÇÃO:
-- Deve ser uma imagem artística, acolhedora e poética.
+- Deve ser uma imagem conceitual e sofisticada, com estética editorial de tecnologia.
 - Sem texto ou palavras na imagem.
 - Retorne em JSON.`;
 
@@ -667,7 +722,7 @@ DIRETRIZES DE CRIAÇÃO:
 
     const craftData = JSON.parse(promptCraftResponse.text || '{}');
     finalImagePrompt = craftData.imagePromptInEnglish || `Minimalist editorial illustration for ${title}, soft warm lighting, fine art`;
-    conceptDesc = craftData.conceptExplanation || 'Ilustração editorial conceitual acolhedora.';
+    conceptDesc = craftData.conceptExplanation || 'Ilustração editorial conceitual de tecnologia.';
     altTextDesc = craftData.altText || `Ilustração de capa sobre ${title}`;
 
     // Clean prompt for URL construction
@@ -706,10 +761,10 @@ app.post('/api/refine-selection', async (req, res) => {
     }
 
     const authorName = userManifesto?.authorName || 'Autor(a)';
-    const worldview = userManifesto?.worldviewDescription || 'Visão ensaística e clínica';
-    const authorTone = userManifesto?.toneOfVoice || 'Acolhedor, ensaístico, denso e profundo';
+    const worldview = userManifesto?.worldviewDescription || 'Visão analítica e autoral sobre tecnologia';
+    const authorTone = userManifesto?.toneOfVoice || 'Analítico, preciso, denso e didático';
 
-    const systemPrompt = `Você é um Revisor e Escritor Clínico/Editorial de Psicologia do autor ${authorName}.
+    const systemPrompt = `Você é o Revisor e Editor de Texto Técnico do autor ${authorName}.
 Sua tarefa é REESCREVER estritamente o trecho de texto selecionado pelo usuário, aplicando com rigor a instrução de correção fornecida.
 
 === VISÃO DE MUNDO E TOM DE VOZ ===
@@ -777,11 +832,11 @@ app.post('/api/generate-derived-formats', async (req, res) => {
     }
 
     const authorName = userManifesto?.authorName || 'Autor(a)';
-    const worldview = userManifesto?.worldviewDescription || 'Visão ensaística e clínica de psicologia';
-    const authorTone = userManifesto?.toneOfVoice || 'Acolhedor, profundo e provocativo';
+    const worldview = userManifesto?.worldviewDescription || 'Análise crítica de tecnologia e engenharia de software';
+    const authorTone = userManifesto?.toneOfVoice || 'Analítico, profundo e provocativo';
 
-    const systemPrompt = `Você é um Especialista em Adaptação de Conteúdo Editorial para Mídias Sociais de Psicologia.
-Seu objetivo é transformar o ensaio de psicologia do autor (${authorName}) em dois formatos dinâmicos sem perder a elegância, a densidade e o tom ensaístico:
+    const systemPrompt = `Você é um Especialista em Adaptação de Conteúdo Editorial Técnico para Mídias Sociais.
+Seu objetivo é transformar o artigo técnico do autor (${authorName}) em dois formatos dinâmicos sem perder a elegância, a densidade e o tom ensaístico:
 1. ROTEIRO DE CARROSSEL DE 5 A 8 SLIDES: Cada slide com um título forte, um parágrafo reflexivo curto (sem clichês) e uma indicação de elemento visual/atmosfera.
 2. ROTEIRO DE VÍDEO CURTO / REELS (60s): Com gancho inicial impactante, 3 momentos de fala contínua e uma chamada reflexiva para comentários.
 
@@ -1014,7 +1069,18 @@ app.post('/api/supabase/publish', async (req, res) => {
       status,
       blog_id: article.blogId || null,
       published_at: status === 'published' ? article.publishedAt || new Date().toISOString() : null,
-      raw_json: article,
+
+      // Procedência, e só. O ArticlePost inteiro NÃO vai para cá: a policy de
+      // RLS filtra por linha, não por coluna, então tudo que estiver nesta
+      // tabela é legível por qualquer um com a anon key — que é pública por
+      // estar no bundle do blog. Pareceres do comitê, prompts customizados,
+      // dossiê de fact-check e o rascunho pré-revisão ficam só no Studio.
+      raw_json: {
+        studioPostId: article.id,
+        generatedAt: article.createdAt,
+        publishedFrom: 'aether-studio',
+        schemaVersion: 1,
+      },
     };
 
     const { data, error } = await supabase
@@ -1093,8 +1159,12 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`PsicoContent Studio server running on http://0.0.0.0:${PORT}`);
+  // 127.0.0.1 e não 0.0.0.0: o Studio guarda a service_role key e a chave do
+  // Gemini, e não tem autenticação nenhuma. Escutando em todas as interfaces,
+  // qualquer dispositivo da mesma rede poderia publicar no blog e consumir a
+  // cota de IA. Aqui, só a própria máquina alcança.
+  app.listen(PORT, '127.0.0.1', () => {
+    console.log(`Aether Studio rodando em http://127.0.0.1:${PORT}`);
   });
 }
 

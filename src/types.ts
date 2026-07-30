@@ -46,12 +46,16 @@ export interface FactCheckSource {
 
 export interface FactCheckReport {
   researchSummary: string;
-  credibilityScore: number; // 0 a 100
+  /** 0 a 100. `null` quando a apuração não produziu nota — nunca use um default. */
+  credibilityScore: number | null;
   verifiedFacts: string[];
   unverifiedClaimsOrRumors?: string[];
   sources: FactCheckSource[];
+  /** true apenas quando houve pesquisa real na web com fontes consultadas.
+   *  Sem isso não há selo de verificação. */
+  groundingUsed: boolean;
   checkedAt: string;
-  verdict: 'Verificado e Confiável' | 'Requer Cautela' | 'Informação Parcial ou em Atualização';
+  verdict: string;
 }
 
 export interface DraftResult {

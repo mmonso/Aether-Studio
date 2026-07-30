@@ -147,6 +147,9 @@ export interface ArticlePost {
   status: 'researching' | 'drafting' | 'reviewing' | 'generating_image' | 'completed' | 'error';
   isPublished?: boolean;
   publishedAt?: string;
+  /** Slug com que o artigo foi para o blog. Existe = está publicado no Supabase.
+   *  É o que mantém a URL estável e faz republicar atualizar em vez de duplicar. */
+  publishedSlug?: string;
   errorMessage?: string;
 }
 

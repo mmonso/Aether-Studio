@@ -3,6 +3,7 @@ import path from 'path';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
+import { stripDuplicateTitleHeading } from './src/lib/markdown';
 
 dotenv.config();
 
@@ -413,6 +414,7 @@ Extensão do Texto: ${lengthGuide}
 4. Mantenha os conceitos assimilados organicamente sem jargões pretensiosos vazios.
 5. NUNCA termine com resumos burocráticos ("Em suma...", "Em conclusão..."). Mantenha o encerramento marcante e reflexivo.
 6. Mantenha o texto em prosa fluida, densa e envolvente do início ao fim.
+7. NUNCA repita o título do artigo como cabeçalho no corpo do texto. O campo "title" já carrega o título; o "rawText" deve começar direto pelo primeiro parágrafo, sem nenhum H1 (#) inicial.
 
 ${customWriterPrompt ? `\nINSTRUÇÕES ADICIONAIS DO USUÁRIO:\n${customWriterPrompt}` : ''}`;
 
@@ -529,6 +531,7 @@ CRÍTICO: O texto final ("revisedText") NUNCA PODE SER UMA COLCHA DE RETALHOS co
 O Redator Principal recebe os pareceres dos especialistas acima e REESCREVE O ARTIGO DO ZERO de forma totalmente integrada, fluida e coesa.
 - Todas as correções de humanização, rigor conceitual e conformidade editorial/fact-check devem ser dissolvidas organicamente em uma única voz autoral.
 - O texto final deve ser formatado em Markdown impecável, sem listas numeradas de 5 passos e sem clichês.
+- O "revisedText" NUNCA deve abrir repetindo o título como H1 (#). O título vai no campo "revisedTitle"; o corpo começa pelo primeiro parágrafo.
 - No campo "writerSynthesisNotes", o Redator explica resumidamente como unificou as orientações dos especialistas em uma narrativa fluida.
 
 ${customReviewerPrompt ? `\nINSTRUÇÕES ADICIONAIS DO USUÁRIO PARA A REVISÃO:\n${customReviewerPrompt}` : ''}`;
@@ -856,103 +859,218 @@ ${text}`;
   }
 });
 
-// 6. SUPABASE INTEGRATION: Test Connection
-app.post('/api/supabase/test-connection', async (req, res) => {
+// ===================================================================
+// SUPABASE — ponte com o blog público
+//
+// A escrita usa a service_role key, que ignora RLS e só existe aqui,
+// no servidor local do Studio. O blog público carrega apenas a anon
+// key, que lê artigos publicados e não escreve nada.
+// ===================================================================
+
+const POSTS_TABLE = 'posts';
+const COVERS_BUCKET = process.env.SUPABASE_COVERS_BUCKET || 'article-covers';
+
+function getSupabaseAdmin() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  if (!url || !key) {
+    throw new Error(
+      'Supabase não configurado. Defina SUPABASE_URL e SUPABASE_SERVICE_ROLE_KEY no .env do Studio ' +
+        '(a service_role key fica em Project Settings > API).'
+    );
+  }
+
+  return createClient(url, key, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
+function slugify(text: string): string {
+  return String(text || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/(^-|-$)/g, '')
+    .slice(0, 80);
+}
+
+// Arquiva a capa no Storage do Supabase para o blog não depender de uma
+// URL gerada sob demanda por um serviço externo.
+async function persistCoverImage(
+  supabase: ReturnType<typeof getSupabaseAdmin>,
+  imageUrl: string,
+  slug: string
+): Promise<string> {
+  if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) return imageUrl || '';
+
+  // Já está no nosso bucket: nada a fazer.
+  if (imageUrl.includes(`/storage/v1/object/public/${COVERS_BUCKET}/`)) return imageUrl;
+
   try {
-    const { supabaseUrl, supabaseKey, tableName } = req.body;
-    const url = supabaseUrl || process.env.SUPABASE_URL || 'https://nxutdbhcedjcdfvsbrzt.supabase.co';
-    const key = supabaseKey || process.env.SUPABASE_ANON_KEY;
-    const table = tableName || 'posts';
+    const response = await fetch(imageUrl);
+    if (!response.ok) throw new Error(`download falhou com HTTP ${response.status}`);
 
-    if (!url || !key) {
-      return res.status(400).json({ success: false, error: 'URL do Supabase e Anon Key são obrigatórios.' });
-    }
+    const contentType = response.headers.get('content-type') || 'image/jpeg';
+    const extension = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
+    const buffer = Buffer.from(await response.arrayBuffer());
+    const objectPath = `${slug}.${extension}`;
 
-    const supabase = createClient(url, key);
-    // Perform a light query to test if project and table exist
-    const { data, error } = await supabase.from(table).select('*', { count: 'exact', head: true });
+    const { error: uploadError } = await supabase.storage
+      .from(COVERS_BUCKET)
+      .upload(objectPath, buffer, { contentType, upsert: true });
+
+    if (uploadError) throw uploadError;
+
+    const { data } = supabase.storage.from(COVERS_BUCKET).getPublicUrl(objectPath);
+    return data.publicUrl;
+  } catch (err: any) {
+    // Uma capa não vale derrubar a publicação: mantém a URL original.
+    console.warn(`[Storage] Não foi possível arquivar a capa (${err.message}). Mantendo a URL original.`);
+    return imageUrl;
+  }
+}
+
+// 6. Diagnóstico da conexão e do conteúdo publicado
+app.get('/api/supabase/status', async (_req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    const { count, error } = await supabase
+      .from(POSTS_TABLE)
+      .select('*', { count: 'exact', head: true });
 
     if (error) {
-      // If table does not exist, provide helpful SQL hints
-      if (error.code === '42P01' || error.message?.includes('does not exist')) {
+      if (error.code === '42P01') {
         return res.status(400).json({
           success: false,
-          error: `A tabela '${table}' não foi encontrada no projeto Supabase (${url}). Crie-a no SQL Editor do Supabase utilizando a aba 'SQL da Tabela'.`,
+          error: `A tabela '${POSTS_TABLE}' não existe. Rode o script supabase/001_schema.sql no SQL Editor do Supabase.`,
         });
       }
-      return res.status(400).json({ success: false, error: error.message || 'Erro ao conectar ao Supabase.' });
+      return res.status(400).json({ success: false, error: error.message });
     }
 
-    res.json({ success: true, message: `Conexão estabelecida com sucesso com a tabela '${table}'.` });
+    const { count: publishedCount } = await supabase
+      .from(POSTS_TABLE)
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'published');
+
+    res.json({
+      success: true,
+      url: process.env.SUPABASE_URL,
+      table: POSTS_TABLE,
+      totalPosts: count ?? 0,
+      publishedPosts: publishedCount ?? 0,
+    });
   } catch (error: any) {
-    console.error('Erro no teste Supabase:', error);
-    res.status(500).json({ success: false, error: error.message || 'Erro interno de servidor ao testar Supabase.' });
+    console.error('Erro no diagnóstico Supabase:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 
-// 7. SUPABASE INTEGRATION: Publish Article
+// 7. Publicar (ou republicar) um artigo no blog
 app.post('/api/supabase/publish', async (req, res) => {
   try {
-    const { article, supabaseUrl, supabaseKey, tableName } = req.body;
-    const url = supabaseUrl || process.env.SUPABASE_URL || 'https://nxutdbhcedjcdfvsbrzt.supabase.co';
-    const key = supabaseKey || process.env.SUPABASE_ANON_KEY;
-    const table = tableName || 'posts';
+    const { article, category, authorName, status = 'published' } = req.body;
 
     if (!article) {
       return res.status(400).json({ success: false, error: 'Artigo não fornecido.' });
     }
-    if (!url || !key) {
-      return res.status(400).json({ success: false, error: 'URL do Supabase e Anon Key são obrigatórios.' });
-    }
-
-    const supabase = createClient(url, key);
 
     const title = article.review?.revisedTitle || article.draft?.title || article.topic;
-    const subtitle = article.review?.revisedSubtitle || article.draft?.subtitle || '';
-    const content = article.review?.revisedText || article.draft?.rawText || '';
-    const summary = article.review?.metaDescription || article.draft?.subtitle || '';
-    const coverImage = article.image?.imageUrl || '';
-    const author = article.authorName || article.review?.clinicalNotes ? 'Studio Editorial' : 'Redação';
-    const tags = article.review?.suggestedTags || article.review?.hashtags || article.tags || [];
-    const readingTime = article.review?.readingTimeMinutes || 5;
+    const content = stripDuplicateTitleHeading(
+      article.review?.revisedText || article.draft?.rawText || '',
+      title
+    );
 
-    // Create a URL friendly slug
-    const slug = title
-      .toLowerCase()
-      .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '')
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/(^-|-$)/g, '');
+    if (!title || !content.trim()) {
+      return res.status(400).json({
+        success: false,
+        error: 'O artigo precisa de título e texto revisado antes de ir para o blog.',
+      });
+    }
+
+    const supabase = getSupabaseAdmin();
+
+    // Slug estável: uma vez publicado, o artigo mantém a mesma URL mesmo que
+    // o título mude, e republicar atualiza a linha em vez de duplicar.
+    const slug = article.publishedSlug || slugify(title) || `artigo-${article.id}`;
+
+    const coverImage = await persistCoverImage(supabase, article.image?.imageUrl || '', slug);
 
     const record = {
       title,
-      subtitle,
-      slug: `${slug}-${Date.now().toString(36)}`,
+      subtitle: article.review?.revisedSubtitle || article.draft?.subtitle || null,
+      slug,
       content,
-      summary,
-      cover_image: coverImage,
-      author,
-      tags,
-      reading_time_minutes: readingTime,
-      published_at: new Date().toISOString(),
+      summary: article.review?.metaDescription || article.review?.revisedSubtitle || null,
+      key_takeaways: article.review?.keyTakeaways || [],
+      cover_image: coverImage || null,
+      author: authorName || article.authorName || 'Redação',
+      tags: article.tags || article.review?.suggestedTags || [],
+      category: category || null,
+      language: 'pt',
+      reading_time_minutes: article.review?.readingTimeMinutes || 5,
+      status,
+      blog_id: article.blogId || null,
+      published_at: status === 'published' ? article.publishedAt || new Date().toISOString() : null,
       raw_json: article,
     };
 
-    const { data, error } = await supabase.from(table).insert([record]).select();
+    const { data, error } = await supabase
+      .from(POSTS_TABLE)
+      .upsert(record, { onConflict: 'slug' })
+      .select()
+      .single();
 
     if (error) {
-      console.error('Supabase insert error:', error);
-      return res.status(400).json({ success: false, error: error.message || 'Erro ao inserir registro no Supabase.' });
+      console.error('Supabase upsert error:', error);
+      return res.status(400).json({ success: false, error: error.message });
     }
 
     res.json({
       success: true,
-      message: 'Artigo publicado com sucesso no Supabase!',
-      insertedRecord: data ? data[0] : null,
+      message:
+        status === 'published'
+          ? 'Artigo publicado! Já está no ar no blog.'
+          : 'Artigo salvo como rascunho — ainda não aparece no blog.',
+      slug,
+      record: data,
     });
   } catch (error: any) {
     console.error('Erro ao publicar no Supabase:', error);
-    res.status(500).json({ success: false, error: error.message || 'Erro interno ao publicar no Supabase.' });
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 8. Despublicar: tira do ar sem apagar o registro
+app.post('/api/supabase/unpublish', async (req, res) => {
+  try {
+    const { slug } = req.body;
+    if (!slug) {
+      return res.status(400).json({ success: false, error: 'Slug do artigo não informado.' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const { data, error } = await supabase
+      .from(POSTS_TABLE)
+      .update({ status: 'draft', published_at: null })
+      .eq('slug', slug)
+      .select()
+      .single();
+
+    if (error) {
+      return res.status(400).json({ success: false, error: error.message });
+    }
+
+    res.json({
+      success: true,
+      message: 'Artigo removido do ar. O registro continua salvo como rascunho.',
+      record: data,
+    });
+  } catch (error: any) {
+    console.error('Erro ao despublicar:', error);
+    res.status(500).json({ success: false, error: error.message });
   }
 });
 

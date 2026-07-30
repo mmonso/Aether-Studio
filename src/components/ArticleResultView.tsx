@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import Markdown from 'react-markdown';
 import { ArticlePost, DerivedFormats } from '../types';
 import { getStoredManifesto } from '../lib/storage';
 import {
@@ -37,7 +38,6 @@ import {
   ExternalLink,
   ShieldAlert,
   Database,
-  Zap,
 } from 'lucide-react';
 import { VISUAL_STYLES } from '../data/presetApproaches';
 
@@ -509,23 +509,6 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
     link.click();
   };
 
-  const handleTogglePublish = () => {
-    const nextPublished = !post.isPublished;
-    const updatedPost: ArticlePost = {
-      ...post,
-      isPublished: nextPublished,
-      publishedAt: nextPublished ? new Date().toISOString() : undefined,
-    };
-    onPostUpdated(updatedPost);
-    if (addToast) {
-      if (nextPublished) {
-        addToast('success', 'Artigo Publicado no Blog Oficial!', 'O artigo agora está visível no Portal Público do Leitor.');
-      } else {
-        addToast('info', 'Status alterado para rascunho', 'O artigo deixou de ser exibido como publicado oficialmente.');
-      }
-    }
-  };
-
   const manifesto = getStoredManifesto();
   const displayedCoverUrl = post.image?.imageUrl || imageSrc || '';
 
@@ -549,18 +532,23 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
       
       {/* Top Banner Action Bar */}
       <div className="bg-white dark:bg-[#18191e] rounded-2xl p-4 sm:p-6 border border-stone-200 dark:border-stone-800 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4 transition-colors">
-        <div>
-          <div className="flex items-center space-x-2 text-xs font-semibold text-teal-700 dark:text-amber-300 uppercase tracking-wider">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center space-x-2 text-xs font-semibold text-teal-700 dark:text-amber-300 uppercase tracking-wider min-w-0">
             <Sparkles className="w-4 h-4 text-amber-500 shrink-0" />
-            <span>Artigo Concluído</span>
-            {post.isPublished && (
+            <span className="whitespace-nowrap">Artigo Concluído</span>
+            {post.publishedSlug && post.isPublished && (
               <span className="bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300 text-[10px] font-bold px-2 py-0.5 rounded-full border border-emerald-300 dark:border-emerald-800 flex items-center space-x-1">
                 <Globe className="w-3 h-3 text-emerald-600 dark:text-emerald-400" />
-                <span>Publicado no Blog</span>
+                <span>No ar</span>
               </span>
             )}
-            <span className="text-stone-300 dark:text-stone-700">•</span>
-            <span className="text-stone-500 dark:text-stone-400 truncate max-w-[150px] sm:max-w-none">{post.approachName || post.tone || 'Visão do Autor'}</span>
+            <span className="text-stone-300 dark:text-stone-700 shrink-0">•</span>
+            <span
+              className="text-stone-500 dark:text-stone-400 truncate max-w-[150px] sm:max-w-[280px] lg:max-w-[360px]"
+              title={post.approachName || post.tone || 'Visão do Autor'}
+            >
+              {post.approachName || post.tone || 'Visão do Autor'}
+            </span>
           </div>
           <h2 className="font-serif font-bold text-lg sm:text-2xl text-stone-900 dark:text-stone-100 mt-1 leading-tight">
             {displayedTitle}
@@ -568,18 +556,18 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
         </div>
 
         {/* Copy / PDF / Multiformat Action Buttons */}
-        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto md:max-w-[60%] md:justify-end shrink-0">
           <button
-            onClick={handleTogglePublish}
-            className={`flex-1 md:flex-none px-4 py-2 text-xs font-bold rounded-xl flex items-center justify-center space-x-2 transition-all cursor-pointer min-h-[40px] shadow-sm ${
-              post.isPublished
-                ? 'bg-emerald-700 hover:bg-emerald-800 text-white border border-emerald-600'
-                : 'bg-emerald-800 hover:bg-emerald-700 text-white'
-            }`}
-            title={post.isPublished ? 'Clique para despublicar' : 'Aprovar e disponibilizar no portal do blog'}
+            onClick={() => onOpenSupabaseSync?.(post)}
+            className="flex-1 md:flex-none px-4 py-2 text-xs font-bold rounded-xl flex items-center justify-center space-x-2 transition-all cursor-pointer min-h-[40px] shadow-sm bg-emerald-800 hover:bg-emerald-700 text-white"
+            title={
+              post.publishedSlug
+                ? 'Abrir o painel de publicação para atualizar ou tirar do ar'
+                : 'Enviar este artigo para o blog público'
+            }
           >
             <Globe className="w-4 h-4 text-emerald-200" />
-            <span>{post.isPublished ? '✓ Publicado no Blog' : '🚀 Aprovar & Publicar no Blog'}</span>
+            <span>{post.publishedSlug ? 'Gerenciar Publicação' : 'Publicar no Blog'}</span>
           </button>
 
           <button
@@ -617,16 +605,6 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
             <Edit3 className="w-4 h-4 text-stone-600 dark:text-stone-400" />
             <span>{isEditingText ? 'Ocultar Editor' : 'Editar no Teclado'}</span>
           </button>
-
-          {onOpenSupabaseSync && (
-            <button
-              onClick={() => onOpenSupabaseSync(post)}
-              className="w-full sm:w-auto px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs rounded-xl flex items-center justify-center space-x-1.5 shadow-sm transition-all cursor-pointer min-h-[40px]"
-            >
-              <Zap className="w-4 h-4 text-emerald-200 fill-current" />
-              <span>Publicar no Supabase</span>
-            </button>
-          )}
 
           <button
             onClick={downloadArticle}
@@ -1193,89 +1171,126 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
               </span>
             </div>
 
-            {(displayedText || '')
-              .split('\n\n')
-              .map((paragraph, idx) => {
-                const isHeader2 = paragraph.startsWith('## ');
-                const isHeader3 = paragraph.startsWith('### ');
-                const isList = paragraph.startsWith('- ') || paragraph.startsWith('* ');
-                const isPullQuote = paragraph.startsWith('> ') || paragraph.startsWith('"') && paragraph.endsWith('"');
-
-                if (isHeader2) {
-                  return (
-                    <h2 key={idx} className={`font-sans font-extrabold ${
+            <Markdown
+              components={{
+                h1: ({ node, ...props }) => (
+                  <h1
+                    className={`font-sans font-extrabold ${
+                      readerFontSize === 'sm' ? 'text-2xl' : readerFontSize === 'lg' ? 'text-3xl sm:text-4xl' : 'text-2xl sm:text-3xl'
+                    } mt-8 mb-5 leading-tight ${readerTheme === 'dark' ? 'text-slate-50' : 'text-slate-950'}`}
+                    {...props}
+                  />
+                ),
+                h2: ({ node, ...props }) => (
+                  <h2
+                    className={`font-sans font-extrabold ${
                       readerFontSize === 'sm' ? 'text-xl' : readerFontSize === 'lg' ? 'text-2xl sm:text-3xl' : 'text-xl sm:text-2xl'
                     } mt-10 mb-4 pt-6 border-t ${
                       readerTheme === 'dark' ? 'text-slate-100 border-slate-800' : 'text-slate-900 border-slate-200'
-                    }`}>
-                      {paragraph.replace('## ', '')}
-                    </h2>
-                  );
-                }
-
-                if (isHeader3) {
-                  return (
-                    <h3 key={idx} className={`font-sans font-bold ${
+                    }`}
+                    {...props}
+                  />
+                ),
+                h3: ({ node, ...props }) => (
+                  <h3
+                    className={`font-sans font-bold ${
                       readerFontSize === 'sm' ? 'text-lg' : readerFontSize === 'lg' ? 'text-xl sm:text-2xl' : 'text-lg sm:text-xl'
-                    } mt-8 mb-3 ${
-                      readerTheme === 'dark' ? 'text-slate-100' : 'text-slate-900'
-                    }`}>
-                      {paragraph.replace('### ', '')}
-                    </h3>
-                  );
-                }
-
-                if (isList) {
-                  const items = paragraph.split('\n');
+                    } mt-8 mb-3 ${readerTheme === 'dark' ? 'text-slate-100' : 'text-slate-900'}`}
+                    {...props}
+                  />
+                ),
+                p: ({ node, ...props }) => (
+                  <p
+                    className={`font-sans ${
+                      readerFontSize === 'sm'
+                        ? 'text-base leading-relaxed mb-4'
+                        : readerFontSize === 'lg'
+                        ? 'text-[19px] sm:text-[20px] leading-[1.9] mb-6'
+                        : 'text-[17px] sm:text-[18px] leading-[1.85] mb-5'
+                    } ${readerTheme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}
+                    {...props}
+                  />
+                ),
+                strong: ({ node, ...props }) => (
+                  <strong className={`font-bold ${readerTheme === 'dark' ? 'text-slate-50' : 'text-slate-950'}`} {...props} />
+                ),
+                em: ({ node, ...props }) => <em className="italic" {...props} />,
+                a: ({ node, ...props }) => (
+                  <a
+                    className="text-teal-600 dark:text-teal-400 underline underline-offset-2 hover:text-teal-500"
+                    target="_blank"
+                    rel="noreferrer"
+                    {...props}
+                  />
+                ),
+                ul: ({ node, ...props }) => (
+                  <ul
+                    className={`list-disc pl-6 space-y-2.5 my-4 font-sans ${
+                      readerFontSize === 'sm'
+                        ? 'text-base leading-relaxed'
+                        : readerFontSize === 'lg'
+                        ? 'text-lg sm:text-xl leading-[1.85]'
+                        : 'text-[17px] sm:text-[18px] leading-[1.85]'
+                    } ${readerTheme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}
+                    {...props}
+                  />
+                ),
+                ol: ({ node, ...props }) => (
+                  <ol
+                    className={`list-decimal pl-6 space-y-2.5 my-4 font-sans ${
+                      readerFontSize === 'sm'
+                        ? 'text-base leading-relaxed'
+                        : readerFontSize === 'lg'
+                        ? 'text-lg sm:text-xl leading-[1.85]'
+                        : 'text-[17px] sm:text-[18px] leading-[1.85]'
+                    } ${readerTheme === 'dark' ? 'text-slate-200' : 'text-slate-800'}`}
+                    {...props}
+                  />
+                ),
+                li: ({ node, ...props }) => <li className="pl-1" {...props} />,
+                blockquote: ({ node, ...props }) => (
+                  <blockquote
+                    className={`my-8 p-5 sm:p-6 rounded-r-xl border-l-4 border-teal-500 font-sans not-italic ${
+                      readerTheme === 'dark'
+                        ? 'bg-teal-500/10 text-slate-200'
+                        : readerTheme === 'sepia'
+                        ? 'bg-[#f4ebd0]/80 text-[#2c221e]'
+                        : 'bg-teal-50/80 text-teal-950'
+                    }`}
+                    {...props}
+                  />
+                ),
+                hr: ({ node, ...props }) => (
+                  <hr className={`my-10 ${readerTheme === 'dark' ? 'border-slate-800' : 'border-slate-200'}`} {...props} />
+                ),
+                code: ({ node, inline, className, children, ...props }: any) => {
+                  const match = /language-(\w+)/.exec(className || '');
+                  if (inline) {
+                    return (
+                      <code
+                        className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800/90 text-teal-700 dark:text-teal-300 font-mono text-[0.875em] border border-slate-200/80 dark:border-slate-700/80"
+                        {...props}
+                      >
+                        {children}
+                      </code>
+                    );
+                  }
                   return (
-                    <ul key={idx} className={`list-disc pl-6 space-y-2.5 my-4 font-sans ${
-                      readerFontSize === 'sm' ? 'text-base leading-relaxed' : readerFontSize === 'lg' ? 'text-lg sm:text-xl leading-[1.85]' : 'text-[17px] sm:text-[18px] leading-[1.85]'
-                    } ${
-                      readerTheme === 'dark' ? 'text-slate-200' : 'text-slate-800'
-                    }`}>
-                      {items.map((item, i) => (
-                        <li key={i}>{item.replace(/^[-*]\s+/, '')}</li>
-                      ))}
-                    </ul>
+                    <div className="relative my-8 rounded-xl overflow-hidden border border-slate-800 bg-[#070a12] shadow-md">
+                      <div className="flex items-center justify-between px-4 py-2 bg-slate-900/90 border-b border-slate-800 text-xs font-mono text-slate-400">
+                        <span>{match ? match[1] : 'code'}</span>
+                        <span className="text-[10px] uppercase tracking-wider text-teal-400">Tech Snippet</span>
+                      </div>
+                      <pre className="p-4 sm:p-5 overflow-x-auto text-xs sm:text-sm font-mono leading-relaxed text-slate-100">
+                        <code>{children}</code>
+                      </pre>
+                    </div>
                   );
-                }
-
-                if (isPullQuote) {
-                  const cleanQuote = paragraph.replace(/^>\s*/, '').replace(/^"/, '').replace(/"$/, '');
-                  return (
-                    <blockquote
-                      key={idx}
-                      className={`my-8 p-5 sm:p-6 rounded-r-xl border-l-4 border-teal-500 font-sans not-italic ${
-                        readerTheme === 'dark'
-                          ? 'bg-teal-500/10 text-slate-200'
-                          : readerTheme === 'sepia'
-                          ? 'bg-[#f4ebd0]/80 text-[#2c221e]'
-                          : 'bg-teal-50/80 text-teal-950'
-                      }`}
-                    >
-                      <p className={`pl-2 ${
-                        readerFontSize === 'sm' ? 'text-base' : readerFontSize === 'lg' ? 'text-xl' : 'text-[17px] sm:text-[18px]'
-                      } font-medium leading-relaxed`}>
-                        “{cleanQuote}”
-                      </p>
-                    </blockquote>
-                  );
-                }
-
-                return (
-                  <p key={idx} className={`font-sans ${
-                    readerFontSize === 'sm'
-                      ? 'text-base leading-relaxed mb-4'
-                      : readerFontSize === 'lg'
-                      ? 'text-[19px] sm:text-[20px] leading-[1.9] mb-6'
-                      : 'text-[17px] sm:text-[18px] leading-[1.85] mb-5'
-                  } ${
-                    readerTheme === 'dark' ? 'text-slate-200' : 'text-slate-800'
-                  }`}>
-                    {paragraph}
-                  </p>
-                );
-              })}
+                },
+              }}
+            >
+              {displayedText || ''}
+            </Markdown>
 
             {/* SEÇÃO DE PERGUNTAS E PROVOCAÇÕES PARA REFLEXÃO EDITORIAL */}
             <div className={`mt-10 pt-8 border-t space-y-4 ${

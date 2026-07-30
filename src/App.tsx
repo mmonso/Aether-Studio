@@ -6,7 +6,6 @@ import { ArticleResultView } from './components/ArticleResultView';
 import { ManifestoEditor } from './components/ManifestoEditor';
 import { ArticleHistoryTab } from './components/ArticleHistoryTab';
 import { VirtualTeamInfo } from './components/VirtualTeamInfo';
-import { PublicBlogPortal } from './components/PublicBlogPortal';
 import { BlogManagerModal } from './components/BlogManagerModal';
 import { SupabaseSyncModal } from './components/SupabaseSyncModal';
 import { ToastContainer, ToastMessage } from './components/Toast';
@@ -25,7 +24,6 @@ import {
   getStoredManifesto,
   saveManifestoToStorage,
   getStoredPosts,
-  clearAllPostsFromStorage,
   savePostToStorage,
   deletePostFromStorage,
   createBlogInStorage,
@@ -33,18 +31,10 @@ import {
   deleteBlogFromStorage,
 } from './lib/storage';
 import { VISUAL_STYLES } from './data/presetApproaches';
+import { stripDuplicateTitleHeading } from './lib/markdown';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'create' | 'manifesto' | 'history' | 'team' | 'blog'>('create');
-  
-  // URL Query Parameter handling for standalone blog public view (e.g. ?blog=blog_negocios_inovacao)
-  const [standaloneBlogId, setStandaloneBlogId] = useState<string | null>(() => {
-    if (typeof window !== 'undefined') {
-      const params = new URLSearchParams(window.location.search);
-      return params.get('blog') || params.get('b');
-    }
-    return null;
-  });
+  const [activeTab, setActiveTab] = useState<'create' | 'manifesto' | 'history' | 'team'>('create');
 
   // Theme state ('light' | 'dark')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -77,6 +67,34 @@ export default function App() {
     setIsSupabaseModalOpen(true);
   };
 
+  // Guarda o slug publicado no post local: é ele que mantém a URL estável
+  // e faz a republicação atualizar a linha existente no Supabase.
+  const applyPublishState = (articleId: string, changes: Partial<ArticlePost>) => {
+    setPosts((prev) => {
+      const target = prev.find((p) => p.id === articleId);
+      if (!target) return prev;
+      const updated = { ...target, ...changes, updatedAt: new Date().toISOString() };
+      savePostToStorage(updated);
+      setCurrentPost((cur) => (cur?.id === articleId ? updated : cur));
+      setArticleForSupabase((cur) => (cur?.id === articleId ? updated : cur));
+      return prev.map((p) => (p.id === articleId ? updated : p));
+    });
+  };
+
+  const handleArticlePublished = (articleId: string, slug: string) => {
+    applyPublishState(articleId, {
+      publishedSlug: slug,
+      isPublished: true,
+      publishedAt: new Date().toISOString(),
+    });
+    addToast('success', 'Artigo no ar!', 'Já está visível no blog público.');
+  };
+
+  const handleArticleUnpublished = (articleId: string) => {
+    applyPublishState(articleId, { isPublished: false });
+    addToast('info', 'Artigo removido do ar', 'O registro continua salvo como rascunho no Supabase.');
+  };
+
   // Toast notifications state
   const [toasts, setToasts] = useState<ToastMessage[]>([]);
 
@@ -97,14 +115,13 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [isRegeneratingImage, setIsRegeneratingImage] = useState(false);
 
-  // Load initial blogs and active blog on mount, and reset posts as requested
+  // Load blogs, active workspace and article history on mount
   useEffect(() => {
     const loadedBlogs = getStoredBlogs();
     const loadedActiveId = getStoredActiveBlogId();
     setBlogs(loadedBlogs);
     setActiveBlogId(loadedActiveId);
-    clearAllPostsFromStorage();
-    setPosts([]);
+    setPosts(getStoredPosts());
     setManifesto(getStoredManifesto(loadedActiveId));
   }, []);
 
@@ -271,7 +288,10 @@ export default function App() {
         throw new Error(draftData.error || 'Erro na etapa de redação.');
       }
 
-      const draftResult = draftData.data;
+      const draftResult = {
+        ...draftData.data,
+        rawText: stripDuplicateTitleHeading(draftData.data.rawText, draftData.data.title),
+      };
 
       // Update post state with Draft
       const postWithDraft: ArticlePost = {
@@ -305,7 +325,13 @@ export default function App() {
         throw new Error(reviewData.error || 'Erro na etapa de revisão editorial.');
       }
 
-      const reviewResult = reviewData.data;
+      const reviewResult = {
+        ...reviewData.data,
+        revisedText: stripDuplicateTitleHeading(
+          reviewData.data.revisedText,
+          reviewData.data.revisedTitle
+        ),
+      };
 
       // Update post state with Review
       const postWithReview: ArticlePost = {
@@ -465,33 +491,6 @@ export default function App() {
     }
   };
 
-  // If accessed directly via ?blog=id_do_blog, render strictly the isolated Public Blog Portal for readers
-  if (standaloneBlogId) {
-    const targetBlog = blogs.find((b) => b.id === standaloneBlogId) || activeBlog;
-
-    return (
-      <div className={`min-h-screen font-sans transition-colors duration-300 ${
-        isDark ? 'bg-[#090d16] text-slate-100 dark' : 'bg-slate-50 text-slate-900'
-      }`}>
-        <ToastContainer toasts={toasts} onDismiss={handleDismissToast} />
-        <PublicBlogPortal
-          posts={posts}
-          manifesto={targetBlog.manifesto || manifesto}
-          blogs={blogs}
-          activeBlogId={targetBlog.id}
-          forcedBlogId={targetBlog.id}
-          standaloneMode={true}
-          onBackToStudio={() => {
-            if (typeof window !== 'undefined') {
-              window.history.pushState({}, '', window.location.pathname);
-            }
-            setStandaloneBlogId(null);
-          }}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className={`min-h-screen font-sans flex flex-col transition-colors duration-300 selection:bg-teal-500/20 selection:text-teal-300 ${
       isDark ? 'bg-[#090d16] text-slate-100 dark' : 'bg-slate-50 text-slate-900'
@@ -517,9 +516,9 @@ export default function App() {
         isOpen={isSupabaseModalOpen}
         onClose={() => setIsSupabaseModalOpen(false)}
         articleToPublish={articleForSupabase}
-        onArticlePublished={(articleId) => {
-          addToast('success', 'Publicado no Supabase!', 'O artigo foi enviado com sucesso para a sua tabela do Supabase.');
-        }}
+        authorName={manifesto.authorName}
+        onArticlePublished={handleArticlePublished}
+        onArticleUnpublished={handleArticleUnpublished}
         theme={theme}
       />
 
@@ -624,22 +623,6 @@ export default function App() {
               setActiveTab('create');
             }}
             onCustomizePrompts={() => setActiveTab('manifesto')}
-          />
-        )}
-
-        {/* VIEW 5: PUBLIC BLOG PORTAL TAB */}
-        {activeTab === 'blog' && (
-          <PublicBlogPortal
-            posts={posts}
-            manifesto={manifesto}
-            blogs={blogs}
-            activeBlogId={activeBlog.id}
-            onSelectBlog={handleSelectBlog}
-            onBackToStudio={() => setActiveTab('create')}
-            onSelectPostToViewInStudio={(post) => {
-              setCurrentPost(post);
-              setActiveTab('create');
-            }}
           />
         )}
 

@@ -22,9 +22,13 @@ import {
 } from 'lucide-react';
 import { Blog } from '../types';
 
+// URL do blog público (Vercel em produção, ou o Vite local do Aether-Blog).
+const PUBLIC_BLOG_URL =
+  (import.meta as any).env?.VITE_PUBLIC_BLOG_URL || 'http://localhost:5173';
+
 interface NavbarProps {
-  activeTab: 'create' | 'manifesto' | 'history' | 'team' | 'blog';
-  setActiveTab: (tab: 'create' | 'manifesto' | 'history' | 'team' | 'blog') => void;
+  activeTab: 'create' | 'manifesto' | 'history' | 'team';
+  setActiveTab: (tab: 'create' | 'manifesto' | 'history' | 'team') => void;
   savedCount: number;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
@@ -77,18 +81,11 @@ export const Navbar: React.FC<NavbarProps> = ({
       subtitle: '4 Agentes Especialistas',
       icon: Users,
     },
-    {
-      id: 'blog' as const,
-      label: 'Portal Público',
-      subtitle: 'Visão do Leitor Ao Vivo',
-      icon: Globe,
-      isLive: true,
-    },
   ];
 
   const activeNavItem = navItems.find((item) => item.id === activeTab) || navItems[0];
 
-  const handleNavClick = (tab: 'create' | 'manifesto' | 'history' | 'team' | 'blog') => {
+  const handleNavClick = (tab: 'create' | 'manifesto' | 'history' | 'team') => {
     setActiveTab(tab);
     setMobileMenuOpen(false);
   };
@@ -211,10 +208,6 @@ export const Navbar: React.FC<NavbarProps> = ({
                   <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-slate-200 dark:bg-slate-800 text-slate-700 dark:text-slate-300">
                     {item.badge}
                   </span>
-                )}
-
-                {item.isLive && (
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
                 )}
               </button>
             );
@@ -375,7 +368,7 @@ export const Navbar: React.FC<NavbarProps> = ({
       {/* DESKTOP TOP BREADCRUMB BAR */}
       {/* ========================================== */}
       <div
-        className={`hidden lg:block sticky top-0 z-20 pl-64 xl:pl-72 border-b transition-colors duration-200 ${
+        className={`hidden lg:block sticky top-0 z-20 pl-64 xl:pl-72 border-b backdrop-blur-md transition-colors duration-200 ${
           isDark
             ? 'bg-[#151413]/90 border-[#262422] text-[#e3ded6]'
             : 'bg-[#faf9f6]/90 border-[#e8e5de] text-[#242220]'
@@ -404,13 +397,16 @@ export const Navbar: React.FC<NavbarProps> = ({
             <span className="px-2.5 py-0.5 rounded bg-[#f0ede6] dark:bg-[#22201d] border border-[#e5e0d6] dark:border-[#2a2724] text-stone-700 dark:text-stone-300 text-[11px] font-medium">
               {activeBlog.name}
             </span>
-            <button
-              onClick={() => setActiveTab('blog')}
+            <a
+              href={PUBLIC_BLOG_URL}
+              target="_blank"
+              rel="noreferrer"
               className="px-2.5 py-0.5 rounded bg-stone-900 dark:bg-stone-100 text-stone-100 dark:text-stone-900 font-medium text-[11px] flex items-center space-x-1 cursor-pointer"
+              title="Abrir o blog público em uma nova aba"
             >
               <Globe className="w-3 h-3" />
               <span>Ver Blog</span>
-            </button>
+            </a>
           </div>
         </div>
       </div>

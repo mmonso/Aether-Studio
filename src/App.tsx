@@ -18,20 +18,30 @@ import {
   FactCheckReport,
 } from './types';
 import {
-  getStoredBlogs,
-  getStoredActiveBlogId,
-  saveActiveBlogIdToStorage,
-  getStoredManifesto,
-  saveManifestoToStorage,
-  getStoredPosts,
-  savePostToStorage,
-  deletePostFromStorage,
-  createBlogInStorage,
-  updateBlogInStorage,
-  deleteBlogFromStorage,
+  DEFAULT_USER_MANIFESTO,
+  fetchBlogs,
+  saveBlog,
+  deleteBlog,
+  buildNewBlog,
+  getActiveBlogId,
+  setActiveBlogId as persistActiveBlogId,
+  saveManifesto,
+  fetchArticles,
+  saveArticle,
+  deleteArticle,
 } from './lib/storage';
+import { downloadBackup } from './lib/backup';
 import { VISUAL_STYLES } from './data/presetApproaches';
+import { PRESET_BLOGS } from './data/presetBlogs';
 import { stripDuplicateTitleHeading } from './lib/markdown';
+import {
+  runPipeline,
+  browserCallApi,
+  PipelineStepError,
+  PIPELINE_STEPS,
+  type PipelineStep,
+  type StepPayloads,
+} from './lib/pipeline';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<'create' | 'manifesto' | 'history' | 'team'>('create');
@@ -55,7 +65,10 @@ export default function App() {
   const [blogs, setBlogs] = useState<Blog[]>([]);
   const [activeBlogId, setActiveBlogId] = useState<string>('');
   const [posts, setPosts] = useState<ArticlePost[]>([]);
-  const [manifesto, setManifesto] = useState<UserManifesto>(getStoredManifesto());
+  const [manifesto, setManifesto] = useState<UserManifesto>(DEFAULT_USER_MANIFESTO);
+  /** Falso até os dados chegarem do Supabase. Evita salvar por cima do que
+   *  ainda não foi carregado. */
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
   const [isBlogManagerOpen, setIsBlogManagerOpen] = useState<boolean>(false);
 
   // Supabase Sync state
@@ -67,6 +80,31 @@ export default function App() {
     setIsSupabaseModalOpen(true);
   };
 
+  /**
+   * Grava o artigo na lista local e persiste no Supabase.
+   *
+   * A tela atualiza na hora e a escrita corre atrás. É o oposto de esperar a
+   * rede a cada tecla — e uma falha não some em silêncio: vira toast.
+   *
+   * Antes isto era `savePostToStorage`, síncrono, devolvendo a lista inteira
+   * já atualizada. Com a persistência na rede, o estado local passa a ser a
+   * fonte da tela e o banco, a fonte da verdade.
+   */
+  const persistArticle = (article: ArticlePost) => {
+    setPosts((prev) => {
+      const exists = prev.some((p) => p.id === article.id);
+      return exists ? prev.map((p) => (p.id === article.id ? article : p)) : [article, ...prev];
+    });
+
+    saveArticle(article).catch((err: any) => {
+      addToast(
+        'error',
+        'O artigo não foi salvo',
+        err?.message || 'A alteração está só nesta tela. Tente de novo.'
+      );
+    });
+  };
+
   // Guarda o slug publicado no post local: é ele que mantém a URL estável
   // e faz a republicação atualizar a linha existente no Supabase.
   const applyPublishState = (articleId: string, changes: Partial<ArticlePost>) => {
@@ -74,7 +112,9 @@ export default function App() {
       const target = prev.find((p) => p.id === articleId);
       if (!target) return prev;
       const updated = { ...target, ...changes, updatedAt: new Date().toISOString() };
-      savePostToStorage(updated);
+      saveArticle(updated).catch((err: any) =>
+        addToast('error', 'O artigo não foi salvo', err?.message || 'A alteração está só nesta tela.')
+      );
       setCurrentPost((cur) => (cur?.id === articleId ? updated : cur));
       setArticleForSupabase((cur) => (cur?.id === articleId ? updated : cur));
       return prev.map((p) => (p.id === articleId ? updated : p));
@@ -116,13 +156,52 @@ export default function App() {
   const [isRegeneratingImage, setIsRegeneratingImage] = useState(false);
 
   // Load blogs, active workspace and article history on mount
+  /**
+   * Carga inicial, vinda do Supabase pelo backend.
+   *
+   * Antes era leitura síncrona do localStorage. A troca é o coração da fase 1:
+   * o Studio deixa de depender de um navegador específico para saber quais
+   * blogs existem e o que já foi escrito.
+   */
   useEffect(() => {
-    const loadedBlogs = getStoredBlogs();
-    const loadedActiveId = getStoredActiveBlogId();
-    setBlogs(loadedBlogs);
-    setActiveBlogId(loadedActiveId);
-    setPosts(getStoredPosts());
-    setManifesto(getStoredManifesto(loadedActiveId));
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const loadedBlogs = await fetchBlogs();
+        if (cancelled) return;
+
+        // O blog ativo é preferência local; se apontar para um blog que não
+        // existe mais (apagado noutra máquina), cai no primeiro.
+        const savedId = getActiveBlogId();
+        const resolvedId =
+          loadedBlogs.find((b) => b.id === savedId)?.id || loadedBlogs[0]?.id || '';
+
+        const loadedArticles = resolvedId ? await fetchArticles(resolvedId) : [];
+        if (cancelled) return;
+
+        setBlogs(loadedBlogs);
+        setActiveBlogId(resolvedId);
+        setManifesto(
+          loadedBlogs.find((b) => b.id === resolvedId)?.manifesto || DEFAULT_USER_MANIFESTO
+        );
+        setPosts(loadedArticles);
+      } catch (err: any) {
+        if (!cancelled) {
+          addToast(
+            'error',
+            'Não foi possível carregar seus dados',
+            err?.message || 'Verifique se o Supabase está acessível.'
+          );
+        }
+      } finally {
+        if (!cancelled) setIsLoadingData(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const activeBlog: Blog = blogs.find((b) => b.id === activeBlogId) || blogs[0] || {
@@ -137,21 +216,49 @@ export default function App() {
     updatedAt: new Date().toISOString(),
   };
 
-  // Switch Active Blog
-  const handleSelectBlog = (id: string) => {
-    saveActiveBlogIdToStorage(id);
+  /**
+   * Baixa blogs, manifestos e rascunhos em JSON.
+   *
+   * Hoje o localStorage é a única cópia disso: limpar o navegador, trocar de
+   * máquina ou usar outro perfil apaga tudo (achado #8). Enquanto a migração
+   * para o Supabase não acontece, este botão é a única saída — e depois dela,
+   * é o seguro contra a própria migração.
+   */
+  const handleExportBackup = () => {
+    try {
+      const summary = downloadBackup();
+      addToast(
+        'success',
+        'Histórico exportado',
+        `${summary.blogs} blog(s) e ${summary.posts} artigo(s) salvos no arquivo.`
+      );
+    } catch (err: any) {
+      addToast('error', 'Falha ao exportar', err?.message || 'Não foi possível gerar o arquivo.');
+    }
+  };
+
+  // Switch Active Blog. Troca de workspace: recarrega o histórico daquele blog.
+  const handleSelectBlog = async (id: string, silent = false) => {
+    persistActiveBlogId(id);
     setActiveBlogId(id);
-    const newManifesto = getStoredManifesto(id);
-    setManifesto(newManifesto);
     setCurrentPost(null);
+
     const selectedBlog = blogs.find((b) => b.id === id);
-    if (selectedBlog) {
+    setManifesto(selectedBlog?.manifesto || DEFAULT_USER_MANIFESTO);
+
+    try {
+      setPosts(await fetchArticles(id));
+    } catch (err: any) {
+      addToast('error', 'Falha ao carregar o histórico', err?.message || '');
+    }
+
+    if (selectedBlog && !silent) {
       addToast('info', `Workspace alterado: ${selectedBlog.name}`, `Nicho: ${selectedBlog.niche}`);
     }
   };
 
   // Create New Blog
-  const handleCreateBlog = (
+  const handleCreateBlog = async (
     name: string,
     niche: string,
     description: string,
@@ -160,59 +267,107 @@ export default function App() {
     badgeColor: 'teal' | 'indigo' | 'amber' | 'rose' | 'emerald' | 'violet' | 'cyan',
     presetTemplateId?: string
   ) => {
-    const newBlog = createBlogInStorage(
-      name,
-      niche,
-      description,
-      authorName,
-      professionalTitle,
-      badgeColor,
-      presetTemplateId
-    );
-    const updatedBlogs = getStoredBlogs();
-    setBlogs(updatedBlogs);
-    handleSelectBlog(newBlog.id);
-    addToast('success', 'Novo blog criado com sucesso!', `Equipe virtual de "${name}" ativada.`);
+    try {
+      const template =
+        PRESET_BLOGS.find((p) => p.id === presetTemplateId)?.manifesto || DEFAULT_USER_MANIFESTO;
+
+      const newBlog = buildNewBlog(name, niche, description, {
+        ...template,
+        authorName,
+        professionalTitle,
+      });
+      newBlog.badgeColor = badgeColor;
+
+      await saveBlog(newBlog);
+
+      const refreshed = await fetchBlogs();
+      setBlogs(refreshed);
+      persistActiveBlogId(newBlog.id);
+      setActiveBlogId(newBlog.id);
+      setManifesto(newBlog.manifesto);
+      setPosts([]);
+      setCurrentPost(null);
+
+      addToast('success', 'Novo blog criado com sucesso!', `Equipe virtual de "${name}" ativada.`);
+    } catch (err: any) {
+      addToast('error', 'Não foi possível criar o blog', err?.message || '');
+    }
   };
 
   // Update Blog
-  const handleUpdateBlog = (updatedBlog: Blog) => {
-    const updatedBlogs = updateBlogInStorage(updatedBlog);
-    setBlogs(updatedBlogs);
-    if (updatedBlog.id === activeBlogId) {
-      setManifesto(updatedBlog.manifesto);
+  const handleUpdateBlog = async (updatedBlog: Blog) => {
+    try {
+      await saveBlog(updatedBlog);
+      setBlogs((prev) => prev.map((b) => (b.id === updatedBlog.id ? updatedBlog : b)));
+      if (updatedBlog.id === activeBlogId) {
+        setManifesto(updatedBlog.manifesto);
+      }
+      addToast('success', 'Dados do blog atualizados!');
+    } catch (err: any) {
+      addToast('error', 'Não foi possível salvar o blog', err?.message || '');
     }
-    addToast('success', 'Dados do blog atualizados!');
   };
 
   // Delete Blog
-  const handleDeleteBlog = (id: string) => {
-    const { remainingBlogs, newActiveId } = deleteBlogFromStorage(id);
-    setBlogs(remainingBlogs);
-    handleSelectBlog(newActiveId);
-    addToast('info', 'Blog excluído.');
+  const handleDeleteBlog = async (id: string) => {
+    try {
+      await deleteBlog(id);
+      const remaining = blogs.filter((b) => b.id !== id);
+      setBlogs(remaining);
+
+      if (remaining.length > 0) {
+        await handleSelectBlog(remaining[0].id, true);
+      } else {
+        setActiveBlogId('');
+        setPosts([]);
+      }
+      addToast('info', 'Blog excluído.');
+    } catch (err: any) {
+      // O backend recusa apagar blog com artigo publicado — apagar em cascata
+      // levaria junto conteúdo que está no ar.
+      addToast('error', 'Não foi possível excluir', err?.message || '');
+    }
   };
 
   // Save Manifesto for Active Blog
-  const handleSaveManifesto = (updated: UserManifesto) => {
-    setManifesto(updated);
-    saveManifestoToStorage(updated, activeBlogId);
-    // Update active blog in state list
-    setBlogs((prev) =>
-      prev.map((b) => (b.id === activeBlogId ? { ...b, manifesto: updated, authorName: updated.authorName, professionalTitle: updated.professionalTitle } : b))
-    );
-    addToast('success', 'Linha editorial salva!', `Visão de mundo do blog "${activeBlog.name}" foi atualizada.`);
+  const handleSaveManifesto = async (updated: UserManifesto) => {
+    const blog = blogs.find((b) => b.id === activeBlogId);
+    if (!blog) return;
+
+    try {
+      const savedBlog = await saveManifesto(blog, updated);
+      setManifesto(updated);
+      setBlogs((prev) => prev.map((b) => (b.id === activeBlogId ? savedBlog : b)));
+      addToast(
+        'success',
+        'Linha editorial salva!',
+        `Visão de mundo do blog "${savedBlog.name}" foi atualizada.`
+      );
+    } catch (err: any) {
+      addToast('error', 'Não foi possível salvar a linha editorial', err?.message || '');
+    }
   };
 
-  // Handle Starting Production of a New Post (Full Step-by-Step Pipeline)
+  /**
+   * Produz um artigo do início ao fim.
+   *
+   * A orquestração mora em `lib/pipeline.ts` e é a MESMA que o worker headless
+   * executa — aqui só se define o transporte (fetch relativo) e o que fazer a
+   * cada etapa concluída. Antes eram ~190 linhas de `fetch` encadeado neste
+   * arquivo, com um único `catch` no fim que jogava fora todo o trabalho pago.
+   */
   const handleStartPipeline = async (input: PostGenerationInput) => {
     setIsGenerating(true);
 
-    const newPostId = `post_${Date.now()}`;
+    const STEP_STATUS: Record<PipelineStep, ArticlePost['status']> = {
+      factcheck: 'researching',
+      draft: 'drafting',
+      review: 'reviewing',
+      image: 'generating_image',
+    };
 
-    // Create initial post object
-    let currentPostObj: ArticlePost = {
-      id: newPostId,
+    let article: ArticlePost = {
+      id: crypto.randomUUID(),
       blogId: activeBlog.id,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -223,176 +378,59 @@ export default function App() {
       input,
       status: input.enableFactCheck ? 'researching' : 'drafting',
     };
+    setCurrentPost(article);
 
-    setCurrentPost(currentPostObj);
-
-    try {
-      let factCheckData: FactCheckReport | undefined = undefined;
-
-      // -------------------------------------------------------------
-      // STEP 0: PESQUISADOR & FACT-CHECKER (Pesquisa ao Vivo e Fact-Checking)
-      // -------------------------------------------------------------
-      if (input.enableFactCheck) {
-        const factCheckRes = await fetch('/api/research-factcheck', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            topic: input.topic,
-            newsReferenceUrl: input.newsReferenceUrl,
-            blogName: activeBlog.name,
-            blogNiche: activeBlog.niche,
-            userManifesto: manifesto,
-          }),
-        });
-
-        const fcJson = await factCheckRes.json();
-        if (fcJson.success && fcJson.data) {
-          factCheckData = fcJson.data;
-          currentPostObj = {
-            ...currentPostObj,
-            factCheck: factCheckData,
-            status: 'drafting',
-          };
-          setCurrentPost(currentPostObj);
-        } else {
-          console.warn('Falha no fact-check, prosseguindo com rascunho direto:', fcJson.error);
-          currentPostObj = {
-            ...currentPostObj,
-            status: 'drafting',
-          };
-          setCurrentPost(currentPostObj);
-        }
-      }
-
-      // -------------------------------------------------------------
-      // STEP 1: REDATOR VIRTUAL (Geração do Rascunho com o Manifesto do Blog)
-      // -------------------------------------------------------------
-      const draftRes = await fetch('/api/generate-draft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic: input.topic,
-          targetAudience: input.targetAudience,
-          depthLevel: input.depthLevel,
-          articleLength: input.articleLength,
-          customWriterPrompt: input.customWriterPrompt,
-          blogName: activeBlog.name,
-          blogNiche: activeBlog.niche,
-          userManifesto: manifesto,
-          factCheck: factCheckData,
-        }),
-      });
-
-      const draftData = await draftRes.json();
-      if (!draftData.success) {
-        throw new Error(draftData.error || 'Erro na etapa de redação.');
-      }
-
-      const draftResult = {
-        ...draftData.data,
-        rawText: stripDuplicateTitleHeading(draftData.data.rawText, draftData.data.title),
-      };
-
-      // Update post state with Draft
-      const postWithDraft: ArticlePost = {
-        ...currentPostObj,
-        draft: draftResult,
-        status: 'reviewing',
-      };
-      setCurrentPost(postWithDraft);
-
-      // -------------------------------------------------------------
-      // STEP 2: REVISOR CLÍNICO & EDITORIAL (Revisão e Polimento)
-      // -------------------------------------------------------------
-      const reviewRes = await fetch('/api/review-draft', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          topic: input.topic,
-          draftTitle: draftResult.title,
-          draftSubtitle: draftResult.subtitle,
-          draftText: draftResult.rawText,
-          customReviewerPrompt: input.customReviewerPrompt,
-          blogName: activeBlog.name,
-          blogNiche: activeBlog.niche,
-          userManifesto: manifesto,
-          factCheck: factCheckData,
-        }),
-      });
-
-      const reviewData = await reviewRes.json();
-      if (!reviewData.success) {
-        throw new Error(reviewData.error || 'Erro na etapa de revisão editorial.');
-      }
-
-      const reviewResult = {
-        ...reviewData.data,
-        revisedText: stripDuplicateTitleHeading(
-          reviewData.data.revisedText,
-          reviewData.data.revisedTitle
-        ),
-      };
-
-      // Update post state with Review
-      const postWithReview: ArticlePost = {
-        ...postWithDraft,
-        review: reviewResult,
-        status: 'generating_image',
-      };
-      setCurrentPost(postWithReview);
-
-      // -------------------------------------------------------------
-      // STEP 3: DESIGNER VISUAL (Criação de Imagem Editorial)
-      // -------------------------------------------------------------
-      const selectedStyle = VISUAL_STYLES.find((s) => s.id === input.visualStyle) || VISUAL_STYLES[0];
-
-      const imgRes = await fetch('/api/generate-image', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          title: reviewResult.revisedTitle || draftResult.title,
-          summary: reviewResult.metaDescription || draftResult.subtitle,
-          visualStyle: selectedStyle.name,
-          promptModifier: selectedStyle.promptModifier,
-          customImagePrompt: input.customImagePrompt,
-        }),
-      });
-
-      const imgData = await imgRes.json();
-      if (!imgData.success) {
-        console.warn('Falha na geração da imagem via Imagen API, usando imagem temática suave.');
-      }
-
-      const imageResult = imgData.data || {
-        imageUrl: `https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&w=1200&q=80`,
-        promptUsed: `Ilustração editorial para ${activeBlog.niche}`,
-        conceptExplanation: 'Imagem conceitual alinhada ao artigo.',
-        altText: `Ilustração sobre ${input.topic}`,
-        styleUsed: selectedStyle.id,
-      };
-
-      // Completed Post
-      const completedPost: ArticlePost = {
-        ...postWithReview,
-        image: imageResult,
-        status: 'completed',
+    /** Reflete os payloads no ArticlePost e persiste. */
+    const applyPayloads = (payloads: StepPayloads, status: ArticlePost['status']) => {
+      article = {
+        ...article,
+        factCheck: payloads.factcheck ?? undefined,
+        draft: payloads.draft,
+        review: payloads.review,
+        image: payloads.image,
+        status,
         updatedAt: new Date().toISOString(),
       };
+      setCurrentPost(article);
+      persistArticle(article);
+    };
 
-      setCurrentPost(completedPost);
-      const updatedPosts = savePostToStorage(completedPost);
-      setPosts(updatedPosts);
+    try {
+      const payloads = await runPipeline({
+        context: {
+          input,
+          blogName: activeBlog.name,
+          blogNiche: activeBlog.niche,
+          manifesto,
+          visualStyle: VISUAL_STYLES.find((s) => s.id === input.visualStyle) || VISUAL_STYLES[0],
+        },
+        callApi: browserCallApi,
+        onStepStart: (step) => setCurrentPost((cur) => (cur ? { ...cur, status: STEP_STATUS[step] } : cur)),
+        // Gravar ANTES de avançar é o que torna a retomada possível: uma falha
+        // na revisão não custa o rascunho de novo.
+        onStepComplete: (step, payloads) => {
+          const nextIndex = PIPELINE_STEPS.indexOf(step) + 1;
+          const nextStep = PIPELINE_STEPS[nextIndex];
+          applyPayloads(payloads, nextStep ? STEP_STATUS[nextStep] : 'completed');
+        },
+      });
+
+      applyPayloads(payloads, 'completed');
     } catch (err: any) {
-      console.error('Pipeline error:', err);
-      setCurrentPost((prev) =>
-        prev
-          ? {
-              ...prev,
-              status: 'error',
-              errorMessage: err.message || 'Falha ao processar o artigo.',
-            }
-          : null
-      );
+      // O que já foi produzido vem junto no erro e é salvo — é o que permite
+      // retomar em vez de repagar.
+      if (err instanceof PipelineStepError) {
+        applyPayloads(err.payloads, 'error');
+        article = { ...article, errorMessage: err.message };
+        setCurrentPost(article);
+        persistArticle(article);
+        addToast('error', `Falha na etapa "${err.step}"`, err.message);
+      } else {
+        setCurrentPost((cur) =>
+          cur ? { ...cur, status: 'error', errorMessage: err?.message } : cur
+        );
+        addToast('error', 'Falha ao processar o artigo', err?.message || '');
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -427,8 +465,7 @@ export default function App() {
           updatedAt: new Date().toISOString(),
         };
         setCurrentPost(updatedPost);
-        const updatedList = savePostToStorage(updatedPost);
-        setPosts(updatedList);
+        persistArticle(updatedPost);
       }
     } catch (e) {
       console.error('Error regenerating image:', e);
@@ -440,8 +477,7 @@ export default function App() {
   // Handle post updates from Result view (e.g. text edits)
   const handlePostUpdated = (updated: ArticlePost) => {
     setCurrentPost(updated);
-    const updatedList = savePostToStorage(updated);
-    setPosts(updatedList);
+    persistArticle(updated);
     addToast('success', 'Artigo salvo!', 'As alterações no texto e metadados foram salvas.');
   };
 
@@ -472,8 +508,7 @@ export default function App() {
         : undefined,
     };
 
-    const updatedList = savePostToStorage(clonedPost);
-    setPosts(updatedList);
+    persistArticle(clonedPost);
     setCurrentPost(clonedPost);
     setActiveTab('create');
     addToast('success', 'Artigo duplicado com sucesso!', 'Uma cópia pronta para novas edições foi carregada.');
@@ -482,8 +517,10 @@ export default function App() {
   // Handle delete post from history
   const handleDeletePost = (id: string) => {
     if (window.confirm('Excluir este artigo do histórico?')) {
-      const updated = deletePostFromStorage(id);
-      setPosts(updated);
+      setPosts((prev) => prev.filter((p) => p.id !== id));
+      deleteArticle(id).catch((err: any) =>
+        addToast('error', 'O artigo não foi removido do banco', err?.message || '')
+      );
       if (currentPost?.id === id) {
         setCurrentPost(null);
       }
@@ -540,6 +577,7 @@ export default function App() {
         onSelectBlog={handleSelectBlog}
         onOpenBlogManager={() => setIsBlogManagerOpen(true)}
         onOpenSupabaseModal={() => handleOpenSupabaseModal()}
+        onExportBackup={handleExportBackup}
       />
 
       {/* Main Container */}
@@ -567,6 +605,7 @@ export default function App() {
             {!isGenerating && currentPost && currentPost.status === 'completed' && (
               <ArticleResultView
                 post={currentPost}
+                manifesto={manifesto}
                 onPostUpdated={handlePostUpdated}
                 onRegenerateImage={handleRegenerateImage}
                 onClonePost={handleClonePost}

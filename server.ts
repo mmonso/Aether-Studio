@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { GoogleGenAI, Type } from '@google/genai';
 import { createClient } from '@supabase/supabase-js';
 import dotenv from 'dotenv';
@@ -30,33 +31,117 @@ function getGeminiClient(): GoogleGenAI {
   return genAIClient;
 }
 
-// Helper to call Gemini API with exponential backoff on 429 / rate limits / transient server errors
+// ===================================================================
+// MODELOS, RETENTATIVA E INSTRUMENTAÇÃO
+// ===================================================================
+
+/**
+ * Modelo por papel, não por linha de código.
+ *
+ * Antes o nome do modelo estava cravado em 12 lugares, o que fazia de
+ * "experimentar um modelo melhor na redação" uma caçada a string. Agora é
+ * variável de ambiente.
+ *
+ * Tudo aponta para Flash porque é a família com free tier — subir a redação
+ * e a auditoria passa a ser uma decisão, não um refactor.
+ */
+const FLASH = 'gemini-3.6-flash';
+const FLASH_LITE = 'gemini-3.1-flash-lite';
+
+type ModelRole = 'writer' | 'auditor' | 'utility';
+
+const MODELS: Record<ModelRole, { primary: string; fallback: string }> = {
+  // Pauta, rascunho, refinamento: o texto que sai com o nome do autor.
+  writer: {
+    primary: process.env.MODEL_WRITER || FLASH,
+    fallback: process.env.MODEL_WRITER_FALLBACK || FLASH_LITE,
+  },
+  // Pesquisa, fact-check, comitê editorial: quem verifica e julga.
+  auditor: {
+    primary: process.env.MODEL_AUDITOR || FLASH,
+    fallback: process.env.MODEL_AUDITOR_FALLBACK || FLASH_LITE,
+  },
+  // Prompt de imagem, formatos derivados: acessório, não vale gastar.
+  utility: {
+    primary: process.env.MODEL_UTILITY || FLASH,
+    fallback: process.env.MODEL_UTILITY_FALLBACK || FLASH_LITE,
+  },
+};
+
+/**
+ * O que fazer quando o modelo bom está indisponível.
+ *
+ * `downgrade` — troca por um modelo menor e entrega. Certo quando existe um
+ *   humano esperando na frente do navegador: texto pior é melhor que barra de
+ *   progresso eterna.
+ *
+ * `wait` — espera mais e tenta de novo com o mesmo modelo. Certo no pipeline
+ *   automático, onde ninguém está esperando às três da manhã. Não há motivo
+ *   para aceitar texto inferior por pressa que não existe — e o risco real é
+ *   publicar uma semana inteira em modelo rebaixado sem nunca saber.
+ *
+ * Padrão `downgrade` porque hoje só existe o modo interativo. O worker da F2
+ * sobe com AI_FALLBACK_MODE=wait, ou manda o cabeçalho x-aether-mode: auto.
+ */
+type FallbackMode = 'downgrade' | 'wait';
+const DEFAULT_FALLBACK_MODE: FallbackMode =
+  process.env.AI_FALLBACK_MODE === 'wait' ? 'wait' : 'downgrade';
+
+/** Instrumentação por requisição. Achado #7 da revisão: retry e fallback podem
+ *  multiplicar o custo em silêncio, e os avisos morrem no terminal. */
+interface AiUsage {
+  calls: number;
+  retries: number;
+  /** Etapas que rodaram em modelo rebaixado. Vazio é o estado saudável. */
+  degraded: { model: string; insteadOf: string }[];
+  mode: FallbackMode;
+}
+
+const aiUsageStore = new AsyncLocalStorage<AiUsage>();
+
+function currentUsage(): AiUsage | undefined {
+  return aiUsageStore.getStore();
+}
+
+function isRetryable(error: any): 'rate-limit' | 'transient' | null {
+  const errMsg = String(error?.message || error || '');
+  if (
+    errMsg.includes('429') ||
+    errMsg.includes('RESOURCE_EXHAUSTED') ||
+    errMsg.includes('rate-limits') ||
+    errMsg.includes('Quota exceeded') ||
+    error?.status === 429 ||
+    error?.code === 429
+  ) {
+    return 'rate-limit';
+  }
+  if (errMsg.includes('503') || errMsg.includes('overloaded')) return 'transient';
+  return null;
+}
+
+// Retentativa com backoff exponencial em 429 e erros transitórios.
 async function callGeminiWithRetry<T>(
   operation: () => Promise<T>,
   retries = 3,
   delayMs = 1500
 ): Promise<T> {
+  const usage = currentUsage();
   let lastError: any;
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
+      if (usage) usage.calls += 1;
       return await operation();
     } catch (error: any) {
       lastError = error;
-      const errMsg = String(error?.message || error || '');
-      const isRateLimit =
-        errMsg.includes('429') ||
-        errMsg.includes('RESOURCE_EXHAUSTED') ||
-        errMsg.includes('rate-limits') ||
-        errMsg.includes('Quota exceeded') ||
-        error?.status === 429 ||
-        error?.code === 429;
+      const kind = isRetryable(error);
 
-      if (isRateLimit && attempt < retries) {
-        console.warn(`[Gemini API] 429 Rate Limit encountered. Retrying attempt ${attempt}/${retries} after ${delayMs}ms...`);
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-        delayMs *= 2;
-      } else if (attempt < retries && (errMsg.includes('503') || errMsg.includes('overloaded'))) {
-        console.warn(`[Gemini API] 503 Server error encountered. Retrying attempt ${attempt}/${retries}...`);
+      if (kind && attempt < retries) {
+        if (usage) usage.retries += 1;
+        const label = kind === 'rate-limit' ? '429 Rate Limit' : '503 Server error';
+        console.warn(
+          `[Gemini API] ${label}. Retrying attempt ${attempt}/${retries} after ${delayMs}ms...`
+        );
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         delayMs *= 2;
       } else {
@@ -67,12 +152,96 @@ async function callGeminiWithRetry<T>(
   throw lastError;
 }
 
+/**
+ * Executa uma etapa de IA no modelo do papel, aplicando a política de fallback.
+ *
+ * Substitui o padrão que estava repetido em sete endpoints:
+ *   try { chamada(FLASH) } catch { chamada(FLASH_LITE) }
+ * — que rebaixava calado e não contava nada.
+ */
+async function runModelStep<T>(
+  role: ModelRole,
+  call: (modelName: string) => Promise<T>,
+  options: { label: string; retries?: number; delayMs?: number } = { label: role }
+): Promise<T> {
+  const { primary, fallback } = MODELS[role];
+  const usage = currentUsage();
+  const mode = usage?.mode ?? DEFAULT_FALLBACK_MODE;
+  const { label, retries, delayMs } = options;
+
+  try {
+    return await callGeminiWithRetry(() => call(primary), retries, delayMs);
+  } catch (firstError: any) {
+    if (mode === 'wait') {
+      // Sem pressa: insiste no modelo bom com uma janela bem maior em vez de
+      // rebaixar. Se falhar de novo, o job sobe o erro e retoma depois — que é
+      // o comportamento certo para uma fila noturna.
+      console.warn(
+        `[${label}] ${primary} indisponível. Modo 'wait': nova tentativa em janela longa, sem rebaixar.`
+      );
+      return await callGeminiWithRetry(() => call(primary), 3, 30_000);
+    }
+
+    console.warn(`[${label}] ${primary} indisponível. Rebaixando para ${fallback}.`);
+    if (usage) usage.degraded.push({ model: fallback, insteadOf: primary });
+    return await callGeminiWithRetry(() => call(fallback), retries, delayMs);
+  }
+}
+
+/**
+ * Abre um contador de IA por requisição e o anexa à resposta.
+ *
+ * Fica em middleware, e não dentro de cada handler, para que os sete endpoints
+ * passem a reportar consumo sem nenhum deles ser alterado. `aiUsage` só aparece
+ * quando houve chamada de IA — health check e diagnóstico seguem limpos.
+ *
+ * O cabeçalho `x-aether-mode: auto` permite ao worker pedir a política 'wait'
+ * por requisição, sem depender de variável de ambiente do processo.
+ */
+app.use((req, res, next) => {
+  const usage: AiUsage = {
+    calls: 0,
+    retries: 0,
+    degraded: [],
+    mode: req.get('x-aether-mode') === 'auto' ? 'wait' : DEFAULT_FALLBACK_MODE,
+  };
+
+  const sendJson = res.json.bind(res);
+  res.json = (body: any) => {
+    if (usage.calls > 0 && body && typeof body === 'object' && !Array.isArray(body)) {
+      body.aiUsage = usage;
+      if (usage.degraded.length > 0) {
+        console.warn(
+          `[${req.path}] Etapa concluída em modelo rebaixado:`,
+          usage.degraded.map((d) => `${d.model} no lugar de ${d.insteadOf}`).join('; ')
+        );
+      }
+    }
+    return sendJson(body);
+  };
+
+  aiUsageStore.run(usage, next);
+});
+
 // API Health
 app.get('/api/health', (_req, res) => {
   res.json({ status: 'ok', hasKey: !!process.env.GEMINI_API_KEY });
 });
 
 // 0. GERADOR DE TÓPICOS E IDEIAS DE ARTIGOS
+//
+// As pautas nascem do que está em pauta AGORA, e não da memória do modelo,
+// que tem data de corte e por isso sugeria como novidade assunto de um ano
+// atrás. Primeiro uma varredura com o Google Search, depois a curadoria
+// editorial em cima do que a busca trouxe.
+//
+// São duas chamadas porque a API do Gemini não aceita `tools` junto com
+// `responseSchema` — a mesma restrição já enfrentada no fact-check.
+//
+// Se a busca falhar, o gerador continua funcionando de memória: brainstorm
+// sem pesquisa ainda tem valor. Mas a resposta diz `groundingUsed: false`, e
+// a tela avisa — pauta velha vendida como tendência faria você escrever com
+// uma premissa falsa.
 app.post('/api/generate-topics', async (req, res) => {
   try {
     const ai = getGeminiClient();
@@ -115,9 +284,64 @@ DIRETRIZES DE CRIAÇÃO:
 3. Prefira abordagens profundas, elegantes, autênticas e transformadoras.
 4. Para cada tópico, forneça um título marcante, o ângulo de abordagem autoral e a explicação de por que esse tema combina com a filosofia do autor.`;
 
-    const userPrompt = `Gere 6 tópicos de artigos inspiradores e alinhados ao nicho ${bNiche}.
+    // --- Etapa 1: o que está em alta agora (Google Search, sem schema) -------
+    let trendsDigest = '';
+    let trendSources: GroundingSource[] = [];
+
+    const trendPrompt = `Levante o que está em pauta AGORA no nicho "${bNiche}".
+${keyword ? `Recorte obrigatório: "${keyword}".` : ''}
+${category ? `Eixo de interesse: "${category}".` : ''}
+
+Busque no Google e traga:
+1. Lançamentos, anúncios, publicações e mudanças das últimas semanas.
+2. Debates e controvérsias em curso — onde há gente discordando.
+3. Números, versões, nomes e datas exatos, como aparecem na fonte.
+4. O que ainda é rumor ou especulação, marcado como tal.
+
+Priorize o recente sobre o consagrado. Não complete lacunas com conhecimento próprio: se não encontrar, diga que não encontrou.`;
+
+    try {
+      const searchResponse = await runModelStep(
+        'auditor',
+        (modelName) =>
+          ai.models.generateContent({
+            model: modelName,
+            contents: trendPrompt,
+            config: {
+              systemInstruction: `Você é o repórter de pauta do blog "${bName}", especializado em ${bNiche}. Sua função é apurar o que mudou no assunto recentemente, com fontes.`,
+              tools: [{ googleSearch: {} }],
+            },
+          }),
+        { label: 'Tópicos/busca' }
+      );
+
+      trendsDigest = searchResponse.text || '';
+      trendSources = extractGroundingSources(searchResponse);
+    } catch (searchError: any) {
+      console.warn('[Tópicos] A busca de tendências falhou:', searchError.message);
+    }
+
+    const groundingUsed = trendSources.length > 0 && trendsDigest.trim().length > 0;
+
+    if (!groundingUsed) {
+      console.warn('[Tópicos] Sem grounding: as pautas sairão da memória do modelo.');
+    }
+
+    // --- Etapa 2: curadoria editorial em cima do apurado (sem tools) --------
+    const trendContext = groundingUsed
+      ? `\n=== O QUE ESTÁ EM PAUTA AGORA (apurado na web) ===
+${trendsDigest}
+
+=== FONTES CONSULTADAS ===
+${trendSources.map((s) => `- ${s.sourceName}: ${s.title}`).join('\n')}
+
+REGRA: cada uma das 6 pautas deve nascer de algo concreto deste material. Em "newsHook", registre o fato, número ou anúncio recente que ancora a pauta, citando a fonte. Não invente acontecimento que não esteja aqui.`
+      : `\nATENÇÃO: a busca na web não retornou resultado. Gere as pautas a partir do seu próprio conhecimento e deixe "newsHook" vazio. NÃO afirme que algo é recente, novidade ou tendência — você não tem como saber.`;
+
+    const userPrompt = `Gere 6 tópicos de artigos alinhados ao nicho ${bNiche}.
 ${keyword ? `Foco na palavra-chave ou assunto especificado: "${keyword}".` : ''}
-${category ? `Categoria ou eixo de interesse: "${category}".` : ''}`;
+${category ? `Categoria ou eixo de interesse: "${category}".` : ''}
+${trendContext}`;
 
     const generateCall = (modelName: string) =>
       ai.models.generateContent({
@@ -138,6 +362,11 @@ ${category ? `Categoria ou eixo de interesse: "${category}".` : ''}`;
                     angle: { type: Type.STRING, description: 'Ângulo de abordagem do artigo' },
                     whyItFits: { type: Type.STRING, description: 'Por que encaixa na visão de mundo e nicho do blog' },
                     category: { type: Type.STRING, description: 'Categoria do tema' },
+                    newsHook: {
+                      type: Type.STRING,
+                      description:
+                        'O fato, número ou anúncio recente que ancora esta pauta, com a fonte. String vazia quando não houve apuração na web.',
+                    },
                   },
                   required: ['title', 'angle', 'whyItFits', 'category'],
                 },
@@ -148,17 +377,18 @@ ${category ? `Categoria ou eixo de interesse: "${category}".` : ''}`;
         },
       });
 
-    let response;
-    try {
-      response = await callGeminiWithRetry(() => generateCall('gemini-3.6-flash'));
-    } catch (e) {
-      console.warn('Falling back to gemini-3.1-flash-lite for topic generation...');
-      response = await callGeminiWithRetry(() => generateCall('gemini-3.1-flash-lite'));
-    }
+    const response = await runModelStep('writer', generateCall, { label: 'Tópicos/curadoria' });
 
     const resultText = response.text || '{}';
     const parsed = JSON.parse(resultText);
-    res.json({ success: true, topics: parsed.topics || [] });
+
+    res.json({
+      success: true,
+      topics: parsed.topics || [],
+      groundingUsed,
+      sources: trendSources,
+      searchedAt: groundingUsed ? new Date().toISOString() : null,
+    });
   } catch (error: any) {
     console.error('Erro ao gerar tópicos:', error);
     res.status(500).json({ success: false, error: error.message || 'Erro ao gerar tópicos' });
@@ -245,15 +475,18 @@ REGRAS:
     let groundingSources: GroundingSource[] = [];
 
     try {
-      const searchResponse = await callGeminiWithRetry(() =>
-        ai.models.generateContent({
-          model: 'gemini-3.6-flash',
-          contents: researchPrompt,
-          config: {
-            systemInstruction: researchSystemPrompt,
-            tools: [{ googleSearch: {} }],
-          },
-        })
+      const searchResponse = await runModelStep(
+        'auditor',
+        (modelName) =>
+          ai.models.generateContent({
+            model: modelName,
+            contents: researchPrompt,
+            config: {
+              systemInstruction: researchSystemPrompt,
+              tools: [{ googleSearch: {} }],
+            },
+          }),
+        { label: 'Fact-check/busca' }
       );
 
       researchText = searchResponse.text || '';
@@ -334,13 +567,11 @@ ${groundingSources.map((s) => `- ${s.sourceName}: ${s.title}`).join('\n')}`;
         config: { responseMimeType: 'application/json', responseSchema: structureSchema },
       });
 
-    let structured;
-    try {
-      structured = await callGeminiWithRetry(() => structureCall('gemini-3.6-flash'));
-    } catch (e) {
-      console.warn('[Fact-check] Estruturação com flash falhou, tentando flash-lite...');
-      structured = await callGeminiWithRetry(() => structureCall('gemini-3.1-flash-lite'), 2, 500);
-    }
+    const structured = await runModelStep('auditor', structureCall, {
+      label: 'Fact-check/estruturação',
+      retries: 2,
+      delayMs: 500,
+    });
 
     const parsed = JSON.parse(structured.text || '{}');
 
@@ -501,13 +732,7 @@ ${customWriterPrompt ? `\nINSTRUÇÕES ADICIONAIS DO USUÁRIO:\n${customWriterPr
         },
       });
 
-    let response;
-    try {
-      response = await callGeminiWithRetry(() => generateDraftCall('gemini-3.6-flash'));
-    } catch (e) {
-      console.warn('Falling back to gemini-3.1-flash-lite for draft generation...');
-      response = await callGeminiWithRetry(() => generateDraftCall('gemini-3.1-flash-lite'));
-    }
+    const response = await runModelStep('writer', generateDraftCall, { label: 'Redator' });
 
     const text = response.text || '{}';
     const parsedData = JSON.parse(text);
@@ -652,13 +877,9 @@ ${draftText}`;
         },
       });
 
-    let response;
-    try {
-      response = await callGeminiWithRetry(() => generateReviewCall('gemini-3.6-flash'));
-    } catch (e) {
-      console.warn('Falling back to gemini-3.1-flash-lite for review generation...');
-      response = await callGeminiWithRetry(() => generateReviewCall('gemini-3.1-flash-lite'));
-    }
+    const response = await runModelStep('auditor', generateReviewCall, {
+      label: 'Comitê editorial',
+    });
 
     const parsed = JSON.parse(response.text || '{}');
 
@@ -713,12 +934,9 @@ DIRETRIZES DE CRIAÇÃO:
         },
       });
 
-    let promptCraftResponse;
-    try {
-      promptCraftResponse = await callGeminiWithRetry(() => generateCraftCall('gemini-3.6-flash'));
-    } catch (e) {
-      promptCraftResponse = await callGeminiWithRetry(() => generateCraftCall('gemini-3.1-flash-lite'));
-    }
+    const promptCraftResponse = await runModelStep('utility', generateCraftCall, {
+      label: 'Designer/prompt de capa',
+    });
 
     const craftData = JSON.parse(promptCraftResponse.text || '{}');
     finalImagePrompt = craftData.imagePromptInEnglish || `Minimalist editorial illustration for ${title}, soft warm lighting, fine art`;
@@ -806,12 +1024,9 @@ ${fullText ? `CONTEXTO AO ENTORNO (APENAS REFERÊNCIA):\n${fullText.slice(0, 100
         },
       });
 
-    let response;
-    try {
-      response = await callGeminiWithRetry(() => generateRefineCall('gemini-3.6-flash'));
-    } catch (e) {
-      response = await callGeminiWithRetry(() => generateRefineCall('gemini-3.1-flash-lite'));
-    }
+    const response = await runModelStep('writer', generateRefineCall, {
+      label: 'Refinamento de trecho',
+    });
 
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
@@ -899,12 +1114,9 @@ ${text}`;
         },
       });
 
-    let response;
-    try {
-      response = await callGeminiWithRetry(() => generateDerivedCall('gemini-3.6-flash'));
-    } catch (e) {
-      response = await callGeminiWithRetry(() => generateDerivedCall('gemini-3.1-flash-lite'));
-    }
+    const response = await runModelStep('utility', generateDerivedCall, {
+      label: 'Formatos derivados',
+    });
 
     const parsed = JSON.parse(response.text || '{}');
     res.json({ success: true, data: parsed });
@@ -952,14 +1164,40 @@ function getSupabaseAdmin() {
  * artigo só entra no ar no próximo deploy. A resposta diz qual dos dois casos
  * aconteceu, para o Studio não prometer o que não fez.
  */
-async function triggerBlogRebuild(): Promise<{ triggered: boolean; detail: string }> {
-  const hookUrl = process.env.VERCEL_DEPLOY_HOOK_URL;
+async function triggerBlogRebuild(
+  blogId: string
+): Promise<{ triggered: boolean; detail: string }> {
+  // O hook vem de `blog_secrets`, por blog. Era uma variável de ambiente única
+  // (VERCEL_DEPLOY_HOOK_URL) — com dois blogs no ar, publicar num reconstruía o
+  // outro, e só o outro. Era o bloqueio B4.
+  //
+  // A variável de ambiente sobrevive como fallback para quem ainda não migrou
+  // o hook para o banco, mas some quando houver mais de um blog: aí ela é
+  // ambígua por definição.
+  let hookUrl: string | undefined;
+
+  try {
+    const supabase = getSupabaseAdmin();
+    const { data, error } = await supabase
+      .from(SECRETS_TABLE)
+      .select('deploy_hook_url')
+      .eq('blog_id', blogId)
+      .maybeSingle();
+
+    if (error) throw error;
+    hookUrl = data?.deploy_hook_url || undefined;
+  } catch (err: any) {
+    console.warn('[Deploy hook] Não foi possível ler o hook do blog:', err.message);
+  }
+
+  if (!hookUrl) hookUrl = process.env.VERCEL_DEPLOY_HOOK_URL;
 
   if (!hookUrl) {
     return {
       triggered: false,
       detail:
-        'Nenhum deploy hook configurado (VERCEL_DEPLOY_HOOK_URL). O artigo entra no ar no próximo deploy do blog.',
+        `Nenhum deploy hook configurado para o blog "${blogId}". Cadastre-o em blog_secrets.deploy_hook_url — ` +
+        'o artigo entra no ar no próximo deploy.',
     };
   }
 
@@ -991,7 +1229,8 @@ function slugify(text: string): string {
 async function persistCoverImage(
   supabase: ReturnType<typeof getSupabaseAdmin>,
   imageUrl: string,
-  slug: string
+  slug: string,
+  blogId: string
 ): Promise<string> {
   if (!imageUrl || !/^https?:\/\//i.test(imageUrl)) return imageUrl || '';
 
@@ -1005,7 +1244,12 @@ async function persistCoverImage(
     const contentType = response.headers.get('content-type') || 'image/jpeg';
     const extension = contentType.includes('png') ? 'png' : contentType.includes('webp') ? 'webp' : 'jpg';
     const buffer = Buffer.from(await response.arrayBuffer());
-    const objectPath = `${slug}.${extension}`;
+
+    // O caminho é prefixado pelo blog. O bucket é um só e o upload usa
+    // `upsert: true` — sem o prefixo, dois blogs com o mesmo slug trocam de
+    // capa em silêncio. É o irmão gêmeo do B3: corrigir só o upsert do banco
+    // resolveria a linha e deixaria a imagem errada.
+    const objectPath = `${blogId}/${slug}.${extension}`;
 
     const { error: uploadError } = await supabase.storage
       .from(COVERS_BUCKET)
@@ -1021,6 +1265,351 @@ async function persistCoverImage(
     return imageUrl;
   }
 }
+
+// ===================================================================
+// DADOS DO STUDIO — blogs, manifestos e histórico saem do localStorage
+//
+// Estes endpoints usam a service_role e NÃO têm autenticação. Isso só é
+// aceitável porque o servidor escuta em 127.0.0.1 (ver startServer): quem
+// alcança já está na máquina. No dia em que o Studio for hospedado, aqui é o
+// primeiro lugar que precisa de autenticação — é a pendência P3.
+//
+// O front nunca fala direto com o Supabase: a service_role ignora RLS e não
+// pode ir para o navegador.
+// ===================================================================
+
+const BLOGS_TABLE = 'blogs';
+const SECRETS_TABLE = 'blog_secrets';
+const JOBS_TABLE = 'article_jobs';
+
+/** Linha de `blogs` + manifesto de `blog_secrets` → o tipo Blog do front. */
+function rowToBlog(row: any, manifesto: any) {
+  return {
+    id: row.id,
+    name: row.name,
+    niche: row.niche,
+    description: row.description || '',
+    authorName: row.author_name || '',
+    professionalTitle: row.professional_title || '',
+    badgeColor: row.badge_color || 'teal',
+    iconName: row.icon_name || 'Cpu',
+    siteUrl: row.site_url || undefined,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    manifesto: manifesto || {},
+  };
+}
+
+/** O tipo Blog do front → as colunas públicas de `blogs`. */
+function blogToRow(blog: any) {
+  return {
+    id: blog.id,
+    name: blog.name,
+    niche: blog.niche,
+    description: blog.description || null,
+    author_name: blog.authorName || null,
+    professional_title: blog.professionalTitle || null,
+    badge_color: blog.badgeColor || 'teal',
+    icon_name: blog.iconName || 'Cpu',
+    site_url: blog.siteUrl || null,
+  };
+}
+
+// O status do pipeline no front e o estado do job no banco têm nomes
+// diferentes por razões históricas. O mapa fica aqui, num lugar só.
+const STATUS_TO_STATE: Record<string, string> = {
+  researching: 'researching',
+  drafting: 'drafting',
+  reviewing: 'reviewing',
+  generating_image: 'imaging',
+  completed: 'ready',
+  error: 'failed',
+};
+const STATE_TO_STATUS: Record<string, string> = Object.fromEntries(
+  Object.entries(STATUS_TO_STATE).map(([k, v]) => [v, k])
+);
+
+/**
+ * Guarda o ArticlePost inteiro em `step_payloads.article` e espelha nas colunas
+ * só o que precisa ser consultável.
+ *
+ * Sem mapeamento campo a campo de propósito: qualquer campo novo no
+ * ArticlePost passa a ser persistido sem alterar schema, e nada se perde por
+ * esquecimento. As colunas existem para filtrar; o jsonb existe para não mentir.
+ */
+function articleToJobRow(article: any) {
+  return {
+    id: article.id,
+    blog_id: article.blogId,
+    topic: article.topic || null,
+    input: article.input || {},
+    state: STATUS_TO_STATE[article.status] || 'queued',
+    error: article.errorMessage || null,
+    step_payloads: { article },
+  };
+}
+
+function jobRowToArticle(row: any) {
+  const article = row.step_payloads?.article || {};
+  return {
+    ...article,
+    id: row.id,
+    blogId: row.blog_id,
+    status: STATE_TO_STATUS[row.state] || article.status || 'completed',
+  };
+}
+
+// 9. Blogs do Studio: identidade pública + manifesto, numa resposta só
+app.get('/api/studio/blogs', async (_req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+
+    const { data: blogs, error } = await supabase
+      .from(BLOGS_TABLE)
+      .select('*')
+      .order('created_at', { ascending: true });
+    if (error) throw error;
+
+    const { data: secrets, error: secretsError } = await supabase
+      .from(SECRETS_TABLE)
+      .select('blog_id, manifesto');
+    if (secretsError) throw secretsError;
+
+    const manifestoByBlog = new Map((secrets || []).map((s: any) => [s.blog_id, s.manifesto]));
+
+    res.json({
+      success: true,
+      blogs: (blogs || []).map((b: any) => rowToBlog(b, manifestoByBlog.get(b.id))),
+    });
+  } catch (error: any) {
+    console.error('Erro ao listar blogs:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 10. Criar ou atualizar um blog (identidade + manifesto, atômico do ponto de
+//     vista de quem chama)
+app.put('/api/studio/blogs/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const blog = req.body?.blog;
+
+    if (!blog?.name || !blog?.niche) {
+      return res.status(400).json({
+        success: false,
+        error: 'Blog precisa de nome e nicho. O nicho alimenta os prompts de todos os agentes.',
+      });
+    }
+
+    const supabase = getSupabaseAdmin();
+
+    const { error: blogError } = await supabase
+      .from(BLOGS_TABLE)
+      .upsert({ ...blogToRow(blog), id }, { onConflict: 'id' });
+    if (blogError) throw blogError;
+
+    // O manifesto é o ativo autoral: vai para a tabela sem policy pública.
+    const { error: secretError } = await supabase
+      .from(SECRETS_TABLE)
+      .upsert({ blog_id: id, manifesto: blog.manifesto || {} }, { onConflict: 'blog_id' });
+    if (secretError) throw secretError;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Erro ao salvar blog:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 11. Apagar um blog
+app.delete('/api/studio/blogs/:id', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+
+    // Blog com artigo publicado não some: a FK de posts.blog_id recusaria, e
+    // apagar em cascata levaria junto conteúdo que está no ar.
+    const { count, error: countError } = await supabase
+      .from(POSTS_TABLE)
+      .select('id', { count: 'exact', head: true })
+      .eq('blog_id', req.params.id);
+    if (countError) throw countError;
+
+    if ((count ?? 0) > 0) {
+      return res.status(409).json({
+        success: false,
+        error: `Este blog tem ${count} artigo(s) no Supabase. Remova-os antes de apagar o blog.`,
+      });
+    }
+
+    const { error } = await supabase.from(BLOGS_TABLE).delete().eq('id', req.params.id);
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Erro ao apagar blog:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 11.5. Importar o backup do navegador para o Supabase
+//
+// É o caminho que tira blogs, manifestos e rascunhos do localStorage. Também é
+// como o manifesto chega ao banco: a semente do 003 criou `blog_secrets` com
+// `manifesto = '{}'`, e um manifesto vazio faz todo prompt cair nos fallbacks
+// do server.ts — o blog escreve genérico sem nenhum erro aparecer.
+app.post('/api/studio/import', async (req, res) => {
+  try {
+    const backup = req.body?.backup;
+
+    if (backup?.format !== 'aether-studio-backup') {
+      return res.status(400).json({
+        success: false,
+        error: 'Arquivo não é um backup do Aether Studio.',
+      });
+    }
+
+    const readKey = (key: string) => {
+      const raw = backup.data?.[key];
+      if (!raw) return [];
+      try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed : [];
+      } catch {
+        return [];
+      }
+    };
+
+    const blogs = readKey('techstudio_blogs_v3');
+    const articles = readKey('techstudio_posts_v3');
+    const supabase = getSupabaseAdmin();
+
+    let blogCount = 0;
+    let manifestoCount = 0;
+
+    // Quais blogs já existem. Decide o que a importação pode tocar.
+    const { data: existingRows, error: existingError } = await supabase
+      .from(BLOGS_TABLE)
+      .select('id');
+    if (existingError) throw existingError;
+    const existing = new Set((existingRows || []).map((r: any) => r.id));
+
+    for (const blog of blogs) {
+      if (!blog?.id || !blog?.name) continue;
+
+      // A REGRA: o banco é dono da identidade pública; o backup é dono do
+      // manifesto.
+      //
+      // Um backup carrega o RÓTULO do workspace no navegador; `blogs.name`
+      // alimenta o <title>, o og:site_name e o JSON-LD já indexado. Deixar a
+      // importação sobrescrever isso renomeia o site público a partir de um
+      // arquivo antigo — foi exatamente o que aconteceu na primeira
+      // importação, que desfez a reconciliação de nome feita no 004.
+      //
+      // Blog que ainda não existe é criado inteiro; blog que já existe só
+      // recebe o manifesto.
+      if (!existing.has(blog.id)) {
+        const { error: blogError } = await supabase
+          .from(BLOGS_TABLE)
+          .insert(blogToRow(blog));
+        if (blogError) throw blogError;
+      }
+      blogCount++;
+
+      // Só sobrescreve o manifesto quando o backup traz um de verdade. Assim
+      // reimportar um backup antigo não apaga edições feitas depois.
+      const manifesto = blog.manifesto;
+      if (manifesto && Object.keys(manifesto).length > 0) {
+        const { error: secretError } = await supabase
+          .from(SECRETS_TABLE)
+          .upsert({ blog_id: blog.id, manifesto }, { onConflict: 'blog_id' });
+        if (secretError) throw secretError;
+        manifestoCount++;
+      }
+    }
+
+    const isUuid = (value: unknown) =>
+      typeof value === 'string' &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+
+    let articleCount = 0;
+    for (const article of articles) {
+      if (!article?.blogId) continue; // artigo órfão não tem para onde ir
+
+      // Os ids do localStorage são `post_<timestamp>`, e `article_jobs.id` é
+      // uuid. Deixa o banco gerar um novo em vez de recusar a linha — o id
+      // antigo continua preservado dentro de `step_payloads.article`.
+      const row: any = articleToJobRow(article);
+      if (!isUuid(row.id)) delete row.id;
+
+      const { error } = await supabase.from(JOBS_TABLE).upsert(row, { onConflict: 'id' });
+      if (error) throw error;
+      articleCount++;
+    }
+
+    res.json({
+      success: true,
+      imported: { blogs: blogCount, manifestos: manifestoCount, articles: articleCount },
+      skipped: {
+        blogs: blogs.length - blogCount,
+        articles: articles.length - articleCount,
+      },
+    });
+  } catch (error: any) {
+    console.error('Erro ao importar backup:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+// 12. Histórico de artigos do Studio
+app.get('/api/studio/articles', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    let query = supabase.from(JOBS_TABLE).select('*').order('created_at', { ascending: false });
+
+    if (req.query.blogId) query = query.eq('blog_id', String(req.query.blogId));
+
+    const { data, error } = await query;
+    if (error) throw error;
+
+    res.json({ success: true, articles: (data || []).map(jobRowToArticle) });
+  } catch (error: any) {
+    console.error('Erro ao listar artigos:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.put('/api/studio/articles/:id', async (req, res) => {
+  try {
+    const article = req.body?.article;
+    if (!article?.blogId) {
+      return res.status(400).json({ success: false, error: 'Artigo sem blogId.' });
+    }
+
+    const supabase = getSupabaseAdmin();
+    const { error } = await supabase
+      .from(JOBS_TABLE)
+      .upsert({ ...articleToJobRow(article), id: req.params.id }, { onConflict: 'id' });
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Erro ao salvar artigo:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
+
+app.delete('/api/studio/articles/:id', async (req, res) => {
+  try {
+    const supabase = getSupabaseAdmin();
+    const { error } = await supabase.from(JOBS_TABLE).delete().eq('id', req.params.id);
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Erro ao apagar artigo:', error);
+    res.status(500).json({ success: false, error: error.message });
+  }
+});
 
 // 6. Diagnóstico da conexão e do conteúdo publicado
 app.get('/api/supabase/status', async (_req, res) => {
@@ -1080,13 +1669,24 @@ app.post('/api/supabase/publish', async (req, res) => {
       });
     }
 
+    // Sem dono, não publica. O blog_id decide em qual site o artigo aparece,
+    // qual linha o upsert atualiza e onde a capa é arquivada. Deixar passar
+    // um artigo sem ele é o começo do bloqueio B3.
+    const blogId = article.blogId;
+    if (!blogId) {
+      return res.status(400).json({
+        success: false,
+        error: 'O artigo não tem blog_id. Selecione o blog no Studio antes de publicar.',
+      });
+    }
+
     const supabase = getSupabaseAdmin();
 
     // Slug estável: uma vez publicado, o artigo mantém a mesma URL mesmo que
     // o título mude, e republicar atualiza a linha em vez de duplicar.
     const slug = article.publishedSlug || slugify(title) || `artigo-${article.id}`;
 
-    const coverImage = await persistCoverImage(supabase, article.image?.imageUrl || '', slug);
+    const coverImage = await persistCoverImage(supabase, article.image?.imageUrl || '', slug, blogId);
 
     const record = {
       title,
@@ -1102,7 +1702,7 @@ app.post('/api/supabase/publish', async (req, res) => {
       language: 'pt',
       reading_time_minutes: article.review?.readingTimeMinutes || 5,
       status,
-      blog_id: article.blogId || null,
+      blog_id: blogId,
       published_at: status === 'published' ? article.publishedAt || new Date().toISOString() : null,
 
       // Procedência, e só. O ArticlePost inteiro NÃO vai para cá: a policy de
@@ -1118,9 +1718,15 @@ app.post('/api/supabase/publish', async (req, res) => {
       },
     };
 
+    // onConflict por (blog_id, slug), não por slug: republicar atualiza a linha
+    // DAQUELE blog. Com 'slug' sozinho, publicar no blog A sobrescrevia a linha
+    // homônima do blog B e apagava o artigo sem avisar ninguém — bloqueio B3.
+    //
+    // Exige o índice único criado em supabase/002_blog_scoped_slug.sql. Sem ele
+    // o Postgres recusa este upsert.
     const { data, error } = await supabase
       .from(POSTS_TABLE)
-      .upsert(record, { onConflict: 'slug' })
+      .upsert(record, { onConflict: 'blog_id,slug' })
       .select()
       .single();
 
@@ -1132,7 +1738,7 @@ app.post('/api/supabase/publish', async (req, res) => {
     // Rascunho não muda o site: nada a reconstruir.
     const rebuild =
       status === 'published'
-        ? await triggerBlogRebuild()
+        ? await triggerBlogRebuild(blogId)
         : { triggered: false, detail: 'Rascunho não vai para o ar.' };
 
     res.json({
@@ -1154,15 +1760,26 @@ app.post('/api/supabase/publish', async (req, res) => {
 // 8. Despublicar: tira do ar sem apagar o registro
 app.post('/api/supabase/unpublish', async (req, res) => {
   try {
-    const { slug } = req.body;
+    const { slug, blogId } = req.body;
     if (!slug) {
       return res.status(400).json({ success: false, error: 'Slug do artigo não informado.' });
+    }
+
+    // O slug deixou de ser único no mundo (002_blog_scoped_slug.sql): dois blogs
+    // podem ter 'inteligencia-artificial'. Sem o blog_id, este update pegaria a
+    // linha errada — ou estouraria no .single() por encontrar mais de uma.
+    if (!blogId) {
+      return res.status(400).json({
+        success: false,
+        error: 'blogId não informado. O slug sozinho não identifica mais um artigo.',
+      });
     }
 
     const supabase = getSupabaseAdmin();
     const { data, error } = await supabase
       .from(POSTS_TABLE)
       .update({ status: 'draft', published_at: null })
+      .eq('blog_id', blogId)
       .eq('slug', slug)
       .select()
       .single();
@@ -1173,7 +1790,7 @@ app.post('/api/supabase/unpublish', async (req, res) => {
 
     // Enquanto o rebuild não roda, a página estática do artigo continua
     // publicada. Despublicar de verdade exige reconstruir o site.
-    const rebuild = await triggerBlogRebuild();
+    const rebuild = await triggerBlogRebuild(blogId);
 
     res.json({
       success: true,
@@ -1187,9 +1804,13 @@ app.post('/api/supabase/unpublish', async (req, res) => {
   }
 });
 
+// O app é exportado para o worker headless conseguir subir os mesmos endpoints
+// num processo próprio, sem depender de um Studio aberto (ver worker.ts).
+export { app };
+
 // Vite middleware logic for dev vs prod
-async function startServer() {
-  const PORT = 3000;
+export async function startServer() {
+  const PORT = Number(process.env.PORT) || 3000;
 
   if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
@@ -1215,4 +1836,13 @@ async function startServer() {
   });
 }
 
-startServer();
+// Sobe sozinho quando executado direto (`tsx server.ts`), mas não quando é
+// importado — o worker headless precisa dos mesmos endpoints numa porta
+// própria e controla o ciclo de vida por conta.
+//
+// A checagem é por variável de ambiente, e não por `import.meta.url`, porque o
+// build de produção empacota este arquivo como CJS (esbuild --format=cjs), onde
+// `import.meta` não existe.
+if (process.env.AETHER_NO_AUTOSTART !== '1') {
+  startServer();
+}

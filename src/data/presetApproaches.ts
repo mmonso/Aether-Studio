@@ -1,11 +1,5 @@
 import { VisualStyleOption } from '../types';
 
-export interface AgentPromptsData {
-  writerSystemPrompt: string;
-  reviewerSystemPrompt: string;
-  imageDesignerSystemPrompt: string;
-}
-
 export const VISUAL_STYLES: VisualStyleOption[] = [
   {
     id: 'tech_minimalist_vector',
@@ -44,13 +38,3 @@ export const VISUAL_STYLES: VisualStyleOption[] = [
   }
 ];
 
-export const DEFAULT_AGENT_PROMPTS: AgentPromptsData = {
-  writerSystemPrompt: `Você é o REDATOR VIRTUAL ESPECIALISTA EM TECNOLOGIA E ENGENHARIA DE SOFTWARE do blog.
-Seu objetivo é criar um artigo envolvente, bem estruturado e focado em tecnologia, inteligência artificial e arquitetura, adaptado rigorosamente à visão de mundo e tom de voz informados.`,
-
-  reviewerSystemPrompt: `Você é o REVISOR EDITORIAL E DE ARQUITETURA TECH.
-Sua missão é analisar o artigo do Redator garantindo clareza técnica, precisão conceitual e alinhamento com a visão de mundo do autor.`,
-
-  imageDesignerSystemPrompt: `Você é o DESIGNER VISUAL EDITORIAL especializado em blogs de Tecnologia e Inovação.
-Sua tarefa é analisar o título e resumo do artigo e construir um prompt extremamente detalhado em inglês para geração de imagem conceitual.`
-};

@@ -5,7 +5,7 @@ export interface UserManifesto {
   toneOfVoice: string; // "Tom de voz característico"
   favoriteKeywords: string[]; // "Vocabulário que você costuma usar"
   prohibitedTerms: string[]; // "Termos ou clichês que você evita"
-  targetAudienceDescription: string; // "Descrição do leitor/paciente ideal"
+  targetAudienceDescription: string; // "Descrição do leitor ideal"
   writerInstructions: string; // "Diretrizes específicas para o Redator"
   reviewerInstructions: string; // "Diretrizes para a Revisão"
   ethicsRules: string; // "Suas regras éticas"
@@ -14,11 +14,6 @@ export interface UserManifesto {
   conceptualCuratorInstructions?: string; // "Diretrizes do Curador Conceitual & Filosófico (Guardião da Teoria)"
 }
 
-export interface AgentPrompts {
-  writerSystemPrompt: string;
-  reviewerSystemPrompt: string;
-  imageDesignerSystemPrompt: string;
-}
 
 export interface PostGenerationInput {
   topic: string;
@@ -125,6 +120,10 @@ export interface Blog {
   professionalTitle: string;
   badgeColor?: 'teal' | 'indigo' | 'amber' | 'rose' | 'emerald' | 'violet' | 'cyan';
   iconName?: string;
+  /** Domínio público deste blog. Alimenta o botão "Ver Blog" — que antes
+   *  apontava sempre para o mesmo site, vindo de uma variável de ambiente
+   *  única (bloqueio B5). */
+  siteUrl?: string;
   createdAt: string;
   updatedAt: string;
   manifesto: UserManifesto;

@@ -19,12 +19,25 @@ import {
   ChevronRight,
   Database,
   Zap,
+  Download,
 } from 'lucide-react';
 import { Blog } from '../types';
 
-// URL do blog público (Vercel em produção, ou o Vite local do Aether-Blog).
-const PUBLIC_BLOG_URL =
-  (import.meta as any).env?.VITE_PUBLIC_BLOG_URL || 'http://localhost:5173';
+// URL do blog público, por blog.
+//
+// Era `VITE_PUBLIC_BLOG_URL`: uma variável só, cravada no bundle. Com dois
+// blogs no ar, o botão "Ver Blog" apontava sempre para o mesmo site — bloqueio
+// B5. Agora sai de `blogs.site_url`.
+//
+// A variável de ambiente sobrevive como fallback para o blog que ainda não tem
+// domínio cadastrado, e o último recurso é a porta do `astro dev` local.
+function resolveBlogUrl(blog?: Blog): string {
+  return (
+    blog?.siteUrl ||
+    (import.meta as any).env?.VITE_PUBLIC_BLOG_URL ||
+    'http://localhost:4321'
+  );
+}
 
 interface NavbarProps {
   activeTab: 'create' | 'manifesto' | 'history' | 'team';
@@ -37,6 +50,7 @@ interface NavbarProps {
   onSelectBlog: (id: string) => void;
   onOpenBlogManager: () => void;
   onOpenSupabaseModal?: () => void;
+  onExportBackup?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -50,6 +64,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   onSelectBlog,
   onOpenBlogManager,
   onOpenSupabaseModal,
+  onExportBackup,
 }) => {
   const isDark = theme === 'dark';
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -236,6 +251,27 @@ export const Navbar: React.FC<NavbarProps> = ({
             </button>
           )}
 
+          {/* Backup do histórico local.
+              Rascunhos e manifestos existem em UM navegador só. Este botão é a
+              única forma de tirá-los de lá antes da migração para o Supabase —
+              e o seguro contra a própria migração. */}
+          {onExportBackup && (
+            <button
+              onClick={onExportBackup}
+              title="Baixar rascunhos, blogs e manifestos em JSON"
+              className={`w-full py-2 px-3 rounded-lg border transition-all text-xs font-mono font-bold flex items-center justify-between cursor-pointer ${
+                isDark
+                  ? 'bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border-amber-500/30'
+                  : 'bg-amber-50 hover:bg-amber-100 text-amber-800 border-amber-200'
+              }`}
+            >
+              <div className="flex items-center space-x-2">
+                <Download className="w-3.5 h-3.5 text-amber-500" />
+                <span>Exportar histórico</span>
+              </div>
+            </button>
+          )}
+
           {/* Status Box */}
           <div className="p-2 rounded-lg bg-slate-100 dark:bg-[#111726] border border-slate-200 dark:border-slate-800 flex items-center justify-between text-[11px]">
             <div className="flex items-center space-x-2">
@@ -398,7 +434,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               {activeBlog.name}
             </span>
             <a
-              href={PUBLIC_BLOG_URL}
+              href={resolveBlogUrl(activeBlog)}
               target="_blank"
               rel="noreferrer"
               className="px-2.5 py-0.5 rounded bg-stone-900 dark:bg-stone-100 text-stone-100 dark:text-stone-900 font-medium text-[11px] flex items-center space-x-1 cursor-pointer"

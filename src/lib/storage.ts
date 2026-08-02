@@ -1,284 +1,151 @@
-import { ArticlePost, UserManifesto, AgentPrompts, Blog } from '../types';
+import { ArticlePost, UserManifesto, Blog } from '../types';
 import { PRESET_BLOGS } from '../data/presetBlogs';
-import { INITIAL_SAMPLE_POSTS } from '../data/initialSamplePosts';
 
-const BLOGS_KEY = 'techstudio_blogs_v3';
+/**
+ * Camada de dados do Studio.
+ *
+ * Antes era o `localStorage` inteiro. Agora fala com o backend, que fala com o
+ * Supabase — o front nunca alcança o banco direto, porque a `service_role`
+ * ignora RLS e não pode ir para o navegador.
+ *
+ * O que SOBROU no localStorage é só preferência de interface: qual blog está
+ * aberto e qual tema. Nada aqui é fonte de verdade; se o navegador for limpo,
+ * o Studio reabre no primeiro blog e nada se perde.
+ *
+ * Tudo que toca a rede é assíncrono. Não há versão síncrona de propósito:
+ * uma que "às vezes" devolve cache é como o histórico se perdia antes.
+ */
+
 const ACTIVE_BLOG_KEY = 'techstudio_active_id_v3';
-const POSTS_KEY = 'techstudio_posts_v3';
-const MANIFESTO_KEY = 'techstudio_user_manifesto_v3';
-const PROMPTS_KEY = 'techstudio_agent_prompts_v3';
 
 export const DEFAULT_USER_MANIFESTO: UserManifesto = PRESET_BLOGS[0].manifesto;
 
-export const DEFAULT_AGENT_PROMPTS: AgentPrompts = {
-  writerSystemPrompt:
-    'Você é o Redator Virtual Especialista em Tecnologia e Engenharia de Software. Sua missão é escrever ensaios técnicos profundos, didáticos e com visão crítica sobre inovação.',
-  reviewerSystemPrompt:
-    'Você é o Revisor Editorial e de Arquitetura Tech. Sua missão é garantir rigor técnico, clareza conceitual, eliminação de clichês de IA e excelente alinhamento de engenharia.',
-  imageDesignerSystemPrompt:
-    'Você é o Designer Visual Editorial Tech. Sua missão é criar metáforas visuais conceituais e elegantes para artigos de tecnologia e IA.',
-};
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, {
+    headers: { 'Content-Type': 'application/json' },
+    ...init,
+  });
 
-// -----------------------------------------------------------------
-// BLOGS MULTI-WORKSPACE STORAGE
-// -----------------------------------------------------------------
+  const json = await res.json().catch(() => null);
 
-export function getStoredBlogs(): Blog[] {
-  try {
-    const data = localStorage.getItem(BLOGS_KEY);
-    if (data) {
-      const parsed = JSON.parse(data);
-      if (Array.isArray(parsed) && parsed.length > 0) {
-        return parsed.map((b: any) => ({
-          ...b,
-          manifesto: b.manifesto || PRESET_BLOGS[0].manifesto,
-        }));
-      }
-    }
-  } catch (e) {
-    console.error('Error reading blogs from storage:', e);
+  if (!res.ok || !json?.success) {
+    throw new Error(json?.error || `Falha em ${path} (HTTP ${res.status}).`);
   }
 
-  // Fallback: Initialize with preset blogs
-  const now = new Date().toISOString();
-  const initialBlogs: Blog[] = PRESET_BLOGS.map((pb) => ({
-    id: pb.id,
-    name: pb.name,
-    niche: pb.niche,
-    description: pb.description,
-    authorName: pb.authorName,
-    professionalTitle: pb.professionalTitle,
-    badgeColor: pb.badgeColor,
-    iconName: pb.iconName,
-    createdAt: now,
-    updatedAt: now,
-    manifesto: pb.manifesto,
-  }));
-
-  saveBlogsToStorage(initialBlogs);
-  return initialBlogs;
+  return json as T;
 }
 
-export function saveBlogsToStorage(blogs: Blog[]): Blog[] {
-  try {
-    localStorage.setItem(BLOGS_KEY, JSON.stringify(blogs));
-  } catch (e) {
-    console.error('Error saving blogs to storage:', e);
-  }
+// -----------------------------------------------------------------
+// BLOGS
+// -----------------------------------------------------------------
+
+export async function fetchBlogs(): Promise<Blog[]> {
+  const { blogs } = await api<{ blogs: Blog[] }>('/api/studio/blogs');
   return blogs;
 }
 
-export function getStoredActiveBlogId(): string {
-  try {
-    const activeId = localStorage.getItem(ACTIVE_BLOG_KEY);
-    const blogs = getStoredBlogs();
-    if (activeId && blogs.some((b) => b.id === activeId)) {
-      return activeId;
-    }
-    if (blogs.length > 0) {
-      return blogs[0].id;
-    }
-  } catch (e) {
-    console.error('Error reading active blog id:', e);
-  }
-  return PRESET_BLOGS[0].id;
+/** Cria ou atualiza. O manifesto vai junto, para `blog_secrets`. */
+export async function saveBlog(blog: Blog): Promise<void> {
+  await api(`/api/studio/blogs/${encodeURIComponent(blog.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ blog }),
+  });
 }
 
-export function saveActiveBlogId(id: string): string {
+export async function deleteBlog(blogId: string): Promise<void> {
+  await api(`/api/studio/blogs/${encodeURIComponent(blogId)}`, { method: 'DELETE' });
+}
+
+/** Monta um blog novo a partir de um manifesto. Ainda não persiste. */
+export function buildNewBlog(
+  name: string,
+  niche: string,
+  description: string,
+  manifesto: UserManifesto
+): Blog {
+  const now = new Date().toISOString();
+  return {
+    id: `blog_${Date.now()}`,
+    name,
+    niche,
+    description,
+    authorName: manifesto.authorName || '',
+    professionalTitle: manifesto.professionalTitle || '',
+    badgeColor: 'teal',
+    iconName: 'Cpu',
+    createdAt: now,
+    updatedAt: now,
+    manifesto,
+  };
+}
+
+// -----------------------------------------------------------------
+// BLOG ATIVO — preferência de interface, não dado
+// -----------------------------------------------------------------
+
+export function getActiveBlogId(): string {
+  try {
+    return localStorage.getItem(ACTIVE_BLOG_KEY) || '';
+  } catch {
+    return '';
+  }
+}
+
+export function setActiveBlogId(id: string): string {
   try {
     localStorage.setItem(ACTIVE_BLOG_KEY, id);
-  } catch (e) {
-    console.error('Error saving active blog id:', e);
+  } catch {
+    /* modo privado sem storage: a escolha vale só nesta sessão */
   }
   return id;
 }
 
-export const saveActiveBlogIdToStorage = saveActiveBlogId;
+// -----------------------------------------------------------------
+// MANIFESTO
+// -----------------------------------------------------------------
 
-export function createNewBlog(
-  name: string,
-  niche: string,
-  description: string,
-  authorName: string,
-  professionalTitle: string,
-  badgeColor: 'teal' | 'indigo' | 'amber' | 'rose' | 'emerald' | 'violet' | 'cyan',
-  presetTemplateId?: string
-): Blog {
-  const blogs = getStoredBlogs();
-  const now = new Date().toISOString();
-
-  // Pick manifesto template if selected, or default
-  const presetMatch = PRESET_BLOGS.find((p) => p.id === presetTemplateId);
-  const baseManifesto = presetMatch ? { ...presetMatch.manifesto } : { ...DEFAULT_USER_MANIFESTO };
-
-  baseManifesto.authorName = authorName;
-  baseManifesto.professionalTitle = professionalTitle;
-
-  const newBlog: Blog = {
-    id: `blog_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
-    name,
-    niche,
-    description,
-    authorName,
-    professionalTitle,
-    badgeColor,
-    createdAt: now,
-    updatedAt: now,
-    manifesto: baseManifesto,
+/** O manifesto mora dentro do blog; salvar é salvar o blog. */
+export async function saveManifesto(
+  blog: Blog,
+  manifesto: UserManifesto
+): Promise<Blog> {
+  const updated: Blog = {
+    ...blog,
+    manifesto,
+    authorName: manifesto.authorName || blog.authorName,
+    professionalTitle: manifesto.professionalTitle || blog.professionalTitle,
+    updatedAt: new Date().toISOString(),
   };
 
-  const updated = [newBlog, ...blogs];
-  saveBlogsToStorage(updated);
-  saveActiveBlogId(newBlog.id);
-
-  return newBlog;
-}
-
-export const createBlogInStorage = createNewBlog;
-
-export function updateBlogInStorage(updatedBlog: Blog): Blog[] {
-  const blogs = getStoredBlogs();
-  const index = blogs.findIndex((b) => b.id === updatedBlog.id);
-  let updatedList: Blog[];
-
-  if (index >= 0) {
-    updatedList = [...blogs];
-    updatedList[index] = {
-      ...updatedBlog,
-      updatedAt: new Date().toISOString(),
-    };
-  } else {
-    updatedList = [updatedBlog, ...blogs];
-  }
-
-  saveBlogsToStorage(updatedList);
-  return updatedList;
-}
-
-export function deleteBlogFromStorage(blogId: string): { remainingBlogs: Blog[]; newActiveId: string } {
-  const blogs = getStoredBlogs();
-  const remaining = blogs.filter((b) => b.id !== blogId);
-
-  // Clean up posts belonging to deleted blog or reassign
-  saveBlogsToStorage(remaining);
-
-  const activeId = getStoredActiveBlogId();
-  let newActiveId = activeId;
-  if (activeId === blogId) {
-    newActiveId = remaining.length > 0 ? remaining[0].id : PRESET_BLOGS[0].id;
-    saveActiveBlogId(newActiveId);
-  }
-
-  return { remainingBlogs: remaining, newActiveId };
-}
-
-// -----------------------------------------------------------------
-// MANIFESTO BACKWARDS COMPATIBILITY
-// -----------------------------------------------------------------
-
-export function getStoredManifesto(blogId?: string): UserManifesto {
-  const blogs = getStoredBlogs();
-  const targetId = blogId || getStoredActiveBlogId();
-  const targetBlog = blogs.find((b) => b.id === targetId);
-
-  if (targetBlog) {
-    return targetBlog.manifesto;
-  }
-  return DEFAULT_USER_MANIFESTO;
-}
-
-export function saveManifestoToStorage(manifesto: UserManifesto, blogId?: string): UserManifesto {
-  const blogs = getStoredBlogs();
-  const targetId = blogId || getStoredActiveBlogId();
-  const targetBlog = blogs.find((b) => b.id === targetId);
-
-  if (targetBlog) {
-    targetBlog.manifesto = manifesto;
-    targetBlog.authorName = manifesto.authorName || targetBlog.authorName;
-    targetBlog.professionalTitle = manifesto.professionalTitle || targetBlog.professionalTitle;
-    updateBlogInStorage(targetBlog);
-  }
-
-  return manifesto;
-}
-
-// -----------------------------------------------------------------
-// POSTS STORAGE
-// -----------------------------------------------------------------
-
-export function getStoredPosts(): ArticlePost[] {
-  try {
-    const data = localStorage.getItem(POSTS_KEY);
-    if (data) {
-      const parsed = JSON.parse(data);
-      if (Array.isArray(parsed)) {
-        return parsed;
-      }
-    }
-  } catch (e) {
-    console.error('Error reading posts from storage:', e);
-  }
-
-  try {
-    localStorage.setItem(POSTS_KEY, JSON.stringify([]));
-  } catch (e) {
-    console.error('Error saving initial empty posts:', e);
-  }
-  return [];
-}
-
-export function clearAllPostsFromStorage(): ArticlePost[] {
-  try {
-    localStorage.setItem(POSTS_KEY, JSON.stringify([]));
-  } catch (e) {
-    console.error('Error clearing posts from storage:', e);
-  }
-  return [];
-}
-
-export function savePostToStorage(post: ArticlePost): ArticlePost[] {
-  const current = getStoredPosts();
-  const index = current.findIndex((p) => p.id === post.id);
-  let updated: ArticlePost[];
-  if (index >= 0) {
-    updated = [...current];
-    updated[index] = post;
-  } else {
-    updated = [post, ...current];
-  }
-  try {
-    localStorage.setItem(POSTS_KEY, JSON.stringify(updated));
-  } catch (e) {
-    console.error('Error saving post to storage:', e);
-  }
+  await saveBlog(updated);
   return updated;
 }
 
-export function deletePostFromStorage(id: string): ArticlePost[] {
-  const current = getStoredPosts();
-  const updated = current.filter((p) => p.id !== id);
-  try {
-    localStorage.setItem(POSTS_KEY, JSON.stringify(updated));
-  } catch (e) {
-    console.error('Error deleting post from storage:', e);
-  }
-  return updated;
+// -----------------------------------------------------------------
+// ARTIGOS — o histórico do Studio, em `article_jobs`
+// -----------------------------------------------------------------
+
+/**
+ * Por que `article_jobs` e não `posts.raw_json`: o ArticlePost carrega
+ * pareceres do comitê, dossiê de fact-check e prompts. O `raw_json` fica
+ * público no instante em que o artigo é publicado (achado #3). `article_jobs`
+ * tem RLS ligada e nenhuma policy — nunca é público, em estado nenhum.
+ */
+export async function fetchArticles(blogId?: string): Promise<ArticlePost[]> {
+  const query = blogId ? `?blogId=${encodeURIComponent(blogId)}` : '';
+  const { articles } = await api<{ articles: ArticlePost[] }>(
+    `/api/studio/articles${query}`
+  );
+  return articles;
 }
 
-export function getStoredAgentPrompts(): AgentPrompts {
-  try {
-    const data = localStorage.getItem(PROMPTS_KEY);
-    return data ? JSON.parse(data) : DEFAULT_AGENT_PROMPTS;
-  } catch (e) {
-    return DEFAULT_AGENT_PROMPTS;
-  }
+export async function saveArticle(article: ArticlePost): Promise<void> {
+  await api(`/api/studio/articles/${encodeURIComponent(article.id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ article }),
+  });
 }
 
-export function saveAgentPrompts(prompts: AgentPrompts): void {
-  try {
-    localStorage.setItem(PROMPTS_KEY, JSON.stringify(prompts));
-  } catch (e) {
-    console.error('Error saving agent prompts:', e);
-  }
+export async function deleteArticle(id: string): Promise<void> {
+  await api(`/api/studio/articles/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
-

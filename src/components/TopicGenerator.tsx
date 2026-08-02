@@ -9,6 +9,10 @@ import {
   RefreshCw,
   Search,
   BookOpen,
+  Globe,
+  AlertTriangle,
+  ExternalLink,
+  Newspaper,
 } from 'lucide-react';
 
 export interface GeneratedTopic {
@@ -16,6 +20,14 @@ export interface GeneratedTopic {
   angle: string;
   whyItFits: string;
   category: string;
+  /** Fato recente que ancora a pauta. Vazio quando não houve apuração. */
+  newsHook?: string;
+}
+
+interface TrendSource {
+  title: string;
+  sourceName: string;
+  url?: string;
 }
 
 interface TopicGeneratorProps {
@@ -32,17 +44,36 @@ const DEFAULT_CATEGORIES = [
   'Inovação, Hardware & Tendências Tech',
 ];
 
+/**
+ * Exemplo de palavra-chave tirado do vocabulário do próprio blog.
+ *
+ * Estava cravado como "Ex: maternidade, perfeccionismo..." — resíduo de quando
+ * o projeto era um blog de psicologia, aparecendo num blog de tecnologia. A
+ * correção não é trocar por exemplos de tech: isso repetiria o mesmo erro no
+ * próximo nicho. O exemplo sai do manifesto, então serve a qualquer blog.
+ */
+function buildKeywordPlaceholder(manifesto: UserManifesto): string {
+  const words = (manifesto.favoriteKeywords || []).filter(Boolean).slice(0, 2);
+  return words.length > 0 ? `Ex: ${words.join(', ')}...` : 'Ex: um tema do seu nicho...';
+}
+
 export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog, onSelectTopic }) => {
   const categoriesToUse = manifesto.themeCategories && manifesto.themeCategories.length > 0
     ? manifesto.themeCategories
     : DEFAULT_CATEGORIES;
 
   const [keyword, setKeyword] = useState('');
+  const keywordPlaceholder = buildKeywordPlaceholder(manifesto);
   const [selectedCategory, setSelectedCategory] = useState<string>('');
   const [topics, setTopics] = useState<GeneratedTopic[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [selectedTitle, setSelectedTitle] = useState<string | null>(null);
+
+  // Procedência das pautas: vieram de apuração na web ou da memória do modelo?
+  const [groundingUsed, setGroundingUsed] = useState(false);
+  const [sources, setSources] = useState<TrendSource[]>([]);
+  const [showSources, setShowSources] = useState(false);
 
   const handleGenerate = async (catOverride?: string) => {
     setIsGenerating(true);
@@ -65,6 +96,9 @@ export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog,
       const data = await res.json();
       if (data.success && Array.isArray(data.topics)) {
         setTopics(data.topics);
+        setGroundingUsed(Boolean(data.groundingUsed));
+        setSources(Array.isArray(data.sources) ? data.sources : []);
+        setShowSources(false);
       } else {
         setErrorMsg(data.error || 'Não foi possível gerar novos tópicos. Tente novamente.');
       }
@@ -95,7 +129,8 @@ export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog,
             Inspiração Alinhada à Sua Visão
           </h3>
           <p className="text-xs text-stone-500 dark:text-stone-400 max-w-xl leading-relaxed">
-            Gere ideias e ângulos de artigos perfeitamente sob medida para a assinatura editorial de <strong>{manifesto.authorName || 'sua publicação'}</strong>.
+            Busca o que está em pauta agora no seu nicho e transforma em ângulos sob medida
+            para a assinatura editorial de <strong>{manifesto.authorName || 'sua publicação'}</strong>.
           </p>
         </div>
 
@@ -131,7 +166,7 @@ export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog,
             <Search className="w-3.5 h-3.5 text-stone-400 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Ex: maternidade, perfeccionismo..."
+              placeholder={keywordPlaceholder}
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
               onKeyDown={(e) => {
@@ -198,8 +233,8 @@ export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog,
       {isGenerating && (
         <div className="space-y-3 py-2">
           <div className="text-center text-xs font-medium text-stone-600 dark:text-stone-400 flex items-center justify-center space-x-2 animate-pulse">
-            <Sparkles className="w-3.5 h-3.5 text-stone-500" />
-            <span>Consultando a filosofia de "{manifesto.authorName || 'sua assinatura'}"...</span>
+            <Globe className="w-3.5 h-3.5 text-stone-500" />
+            <span>Pesquisando o que está em pauta e cruzando com a sua linha editorial...</span>
           </div>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {[1, 2, 3, 4].map((i) => (
@@ -216,6 +251,64 @@ export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog,
       {/* Generated Topics Cards */}
       {!isGenerating && topics.length > 0 && (
         <div className="space-y-3">
+
+          {/* Procedência: de onde vieram estas pautas. Sem isso, uma sugestão
+              tirada da memória do modelo se parece com uma tendência apurada. */}
+          {groundingUsed ? (
+            <div className="bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/40 rounded p-3 space-y-2">
+              <div className="flex items-center justify-between gap-3">
+                <span className="text-[11px] font-medium text-emerald-800 dark:text-emerald-300 flex items-center space-x-1.5">
+                  <Globe className="w-3.5 h-3.5" />
+                  <span>
+                    Pautas ancoradas em {sources.length} {sources.length === 1 ? 'fonte' : 'fontes'} consultadas agora
+                  </span>
+                </span>
+                {sources.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => setShowSources(!showSources)}
+                    className="text-[11px] font-medium text-emerald-800 dark:text-emerald-300 hover:underline cursor-pointer shrink-0"
+                  >
+                    {showSources ? 'ocultar fontes' : 'ver fontes'}
+                  </button>
+                )}
+              </div>
+
+              {showSources && (
+                <ul className="space-y-1 pt-1 border-t border-emerald-200 dark:border-emerald-900/40">
+                  {sources.map((s, i) => (
+                    <li key={i} className="text-[11px] text-emerald-900 dark:text-emerald-200/80 leading-relaxed">
+                      {s.url ? (
+                        <a
+                          href={s.url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="hover:underline inline-flex items-start gap-1"
+                        >
+                          <ExternalLink className="w-3 h-3 mt-0.5 shrink-0" />
+                          <span><strong>{s.sourceName}</strong> — {s.title}</span>
+                        </a>
+                      ) : (
+                        <span><strong>{s.sourceName}</strong> — {s.title}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : (
+            <div className="bg-amber-50 dark:bg-amber-950/20 border border-amber-200 dark:border-amber-900/40 rounded p-3">
+              <span className="text-[11px] text-amber-900 dark:text-amber-300 flex items-start space-x-1.5 leading-relaxed">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-px" />
+                <span>
+                  A busca na web não retornou resultado. Estas pautas saíram da memória do
+                  modelo, que tem data de corte — <strong>não são necessariamente tendência</strong>.
+                  Confira antes de tratar qualquer uma como novidade.
+                </span>
+              </span>
+            </div>
+          )}
+
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-stone-600 dark:text-stone-400 uppercase tracking-wider flex items-center space-x-1">
               <BookOpen className="w-3.5 h-3.5 text-stone-500" />
@@ -253,6 +346,15 @@ export const TopicGenerator: React.FC<TopicGeneratorProps> = ({ manifesto, blog,
                     <h4 className="font-serif font-semibold text-stone-900 dark:text-stone-100 text-base leading-snug">
                       "{t.title}"
                     </h4>
+
+                    {/* O gancho de atualidade vem primeiro: é ele que diz por
+                        que esta pauta faz sentido hoje e não mês passado. */}
+                    {t.newsHook && (
+                      <p className="text-[11px] text-emerald-900 dark:text-emerald-300 bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-200 dark:border-emerald-900/40 p-2.5 rounded leading-relaxed flex items-start gap-1.5">
+                        <Newspaper className="w-3.5 h-3.5 shrink-0 mt-px" />
+                        <span><strong>Gancho:</strong> {t.newsHook}</span>
+                      </p>
+                    )}
 
                     <div className="space-y-1.5 text-xs text-stone-600 dark:text-stone-400 leading-relaxed">
                       <p>

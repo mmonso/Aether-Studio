@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import Markdown from 'react-markdown';
 import { ArticlePost, DerivedFormats } from '../types';
-import { getStoredManifesto } from '../lib/storage';
+import { UserManifesto } from '../types';
 import {
   Copy,
   Check,
@@ -43,6 +43,9 @@ import { VISUAL_STYLES } from '../data/presetApproaches';
 
 interface ArticleResultViewProps {
   post: ArticlePost;
+  /** Manifesto do blog ativo. Vem do App porque agora é carregado do Supabase:
+   *  não dá para ler de forma síncrona no meio da renderização. */
+  manifesto: UserManifesto;
   onPostUpdated: (updatedPost: ArticlePost) => void;
   onRegenerateImage: (styleId: string) => void;
   onClonePost?: (post: ArticlePost) => void;
@@ -53,6 +56,7 @@ interface ArticleResultViewProps {
 
 export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
   post,
+  manifesto,
   onPostUpdated,
   onRegenerateImage,
   onClonePost,
@@ -174,7 +178,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
     setSelectionMessage(null);
 
     try {
-      const manifesto = getStoredManifesto();
+
       const currentFullText = editedText || post.review?.revisedText || post.draft?.rawText || '';
 
       const res = await fetch('/api/refine-selection', {
@@ -240,7 +244,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
     setIsReReviewing(true);
     setReReviewError(null);
     try {
-      const manifesto = getStoredManifesto();
+
       const currentText = editedText || post.review?.revisedText || post.draft?.rawText || '';
       const currentTitle = editedTitle || post.review?.revisedTitle || post.draft?.title || '';
       const currentSubtitle = editedSubtitle || post.review?.revisedSubtitle || post.draft?.subtitle || '';
@@ -286,7 +290,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
     setIsGeneratingDerived(true);
     setDerivedError(null);
     try {
-      const manifesto = getStoredManifesto();
+
       const title = editedTitle || post.review?.revisedTitle || post.draft?.title || post.topic;
       const text = editedText || post.review?.revisedText || post.draft?.rawText || '';
 
@@ -320,7 +324,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
   };
 
   const handleDownloadPDF = () => {
-    const manifesto = getStoredManifesto();
+
     const authorName = manifesto.authorName || post.authorName || 'Psicólogo(a)';
     const professionalTitle = manifesto.professionalTitle || 'Tecnologia & Engenharia de Software';
     const title = editedTitle || post.review?.revisedTitle || post.draft?.title || post.topic;
@@ -509,7 +513,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
     link.click();
   };
 
-  const manifesto = getStoredManifesto();
+
   const displayedCoverUrl = post.image?.imageUrl || imageSrc || '';
 
   const displayedTitle =

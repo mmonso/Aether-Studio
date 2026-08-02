@@ -117,7 +117,10 @@ export const SupabaseSyncModal: React.FC<SupabaseSyncModalProps> = ({
       const res = await fetch('/api/supabase/unpublish', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ slug: articleToPublish.publishedSlug }),
+        body: JSON.stringify({
+          slug: articleToPublish.publishedSlug,
+          blogId: articleToPublish.blogId,
+        }),
       });
 
       const data = await res.json();

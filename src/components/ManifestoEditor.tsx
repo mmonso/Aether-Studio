@@ -162,7 +162,7 @@ export const ManifestoEditor: React.FC<ManifestoEditorProps> = ({ manifesto, onS
           </label>
           <input
             type="text"
-            placeholder="Ex: Pessoas com cobrança pessoal elevada, ansiedade cotidiana, buscando autocompaixão..."
+            placeholder="Descreva quem você quer alcançar: o que essa pessoa busca, o que a incomoda, o que ela já tentou..."
             value={formData.targetAudienceDescription}
             onChange={(e) => setFormData({ ...formData, targetAudienceDescription: e.target.value })}
             className="w-full px-3.5 py-2.5 bg-white dark:bg-[#121110] border border-[#e0dad0] dark:border-[#2a2724] rounded text-stone-900 dark:text-stone-100 text-sm font-normal focus:outline-none focus:border-stone-500"

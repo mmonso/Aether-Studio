@@ -1137,7 +1137,7 @@ ${text}`;
 const POSTS_TABLE = 'posts';
 const COVERS_BUCKET = process.env.SUPABASE_COVERS_BUCKET || 'article-covers';
 
-function getSupabaseAdmin() {
+export function getSupabaseAdmin() {
   const url = process.env.SUPABASE_URL;
   const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
@@ -1836,13 +1836,21 @@ export async function startServer() {
   });
 }
 
-// Sobe sozinho quando executado direto (`tsx server.ts`), mas não quando é
-// importado — o worker headless precisa dos mesmos endpoints numa porta
-// própria e controla o ciclo de vida por conta.
+// Sobe sozinho quando executado direto (`tsx server.ts`, `node dist/server.cjs`),
+// mas não quando é importado — o worker headless precisa dos mesmos endpoints
+// numa porta própria e controla o ciclo de vida por conta.
 //
-// A checagem é por variável de ambiente, e não por `import.meta.url`, porque o
-// build de produção empacota este arquivo como CJS (esbuild --format=cjs), onde
-// `import.meta` não existe.
-if (process.env.AETHER_NO_AUTOSTART !== '1') {
+// A checagem olha o arquivo de entrada, e não uma variável de ambiente: um
+// `process.env.X = '1'` no topo do worker rodaria TARDE DEMAIS, porque em ESM
+// os imports são içados e executam antes de qualquer statement do módulo. A
+// primeira versão desta guarda caiu exatamente nisso, e o worker tentou subir
+// na 3000.
+//
+// Também não usa `import.meta.url`: o build de produção empacota este arquivo
+// como CJS (esbuild --format=cjs), onde `import.meta` não existe.
+const entryFile = path.basename(process.argv[1] || '');
+const isDirectRun = entryFile.startsWith('server.');
+
+if (isDirectRun) {
   startServer();
 }

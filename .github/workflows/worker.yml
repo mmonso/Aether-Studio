@@ -1,0 +1,70 @@
+name: Produção noturna de artigos
+
+# Por que GitHub Actions e não um VPS (revisão da decisão D4):
+#   - sem servidor para manter e sem custo fixo mensal
+#   - segredos ficam no cofre do repositório, não num disco alugado
+#   - o limite de 6h por execução é folgado: um artigo leva ~1 minuto
+#   - o worker nasce e morre a cada execução, então não há processo a vigiar
+#
+# O pipeline em si não tem pressa: sob rate limit ele espera e insiste no
+# modelo bom em vez de rebaixar (AI_FALLBACK_MODE=wait). Ninguém está
+# esperando às três da manhã.
+
+on:
+  schedule:
+    # 06:00 UTC = 03:00 em Brasília. Bem longe do horário de pico da API.
+    - cron: '0 6 * * *'
+  # Permite rodar à mão pelo painel do GitHub — é assim que se testa antes de
+  # confiar no agendamento.
+  workflow_dispatch:
+    inputs:
+      max_jobs:
+        description: 'Quantos artigos processar nesta execução'
+        required: false
+        default: '3'
+
+# Duas execuções simultâneas pegariam os mesmos jobs da fila e gerariam o
+# artigo duas vezes, pagando duas vezes.
+concurrency:
+  group: aether-worker
+  cancel-in-progress: false
+
+jobs:
+  produce:
+    runs-on: ubuntu-latest
+    # Teto de segurança: se algo travar, o job morre em vez de consumir a cota
+    # de minutos do mês inteiro.
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      - name: Processar a fila
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_COVERS_BUCKET: article-covers
+
+          # Sob indisponibilidade, esperar em vez de rebaixar o modelo. O risco
+          # que isto evita: publicar uma semana inteira de artigos escritos pelo
+          # modelo menor sem ninguém perceber.
+          AI_FALLBACK_MODE: wait
+
+          WORKER_MAX_JOBS: ${{ github.event.inputs.max_jobs || '3' }}
+          # Pausa entre artigos: o free tier limita requisições por minuto, e o
+          # worker tem tempo de sobra.
+          WORKER_PACE_MS: '30000'
+          # Freio bruto de custo, por execução.
+          WORKER_MAX_AI_CALLS: '60'
+        run: npm run worker
+
+      # O resultado fica em `posts` com status 'draft' — invisível ao público,
+      # esperando aprovação. Nada vai ao ar sem alguém aprovar (decisão D3).

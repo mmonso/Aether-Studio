@@ -95,6 +95,19 @@ interface AiUsage {
   /** Etapas que rodaram em modelo rebaixado. Vazio é o estado saudável. */
   degraded: { model: string; insteadOf: string }[];
   mode: FallbackMode;
+  /**
+   * Uma etapa esgotou TODAS as tentativas com 429.
+   *
+   * Distingue congestionamento por minuto — em que esperar resolve — de cota
+   * do dia acabada, em que nenhuma espera resolve e cada tentativa ainda conta
+   * como requisição.
+   *
+   * Vive aqui, e não no chamador, porque alguns handlers engolem o erro de
+   * propósito (a busca do gerador de pautas degrada para "sem grounding" e
+   * segue em frente). Sem este sinal, o worker insistiria contra uma cota
+   * morta a execução inteira.
+   */
+  quotaExhausted: boolean;
 }
 
 const aiUsageStore = new AsyncLocalStorage<AiUsage>();
@@ -145,6 +158,8 @@ async function callGeminiWithRetry<T>(
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         delayMs *= 2;
       } else {
+        // Esgotou as tentativas num 429: não é congestionamento momentâneo.
+        if (kind === 'rate-limit' && usage) usage.quotaExhausted = true;
         throw error;
       }
     }
@@ -203,6 +218,7 @@ app.use((req, res, next) => {
     calls: 0,
     retries: 0,
     degraded: [],
+    quotaExhausted: false,
     mode: req.get('x-aether-mode') === 'auto' ? 'wait' : DEFAULT_FALLBACK_MODE,
   };
 

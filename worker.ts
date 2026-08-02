@@ -23,6 +23,12 @@ import {
   type StepPayloads,
 } from './src/lib/pipeline';
 import { VISUAL_STYLES } from './src/data/presetApproaches';
+import {
+  dedupeTopics,
+  remainingThisWeek,
+  buildJobInput,
+  type TopicCandidate,
+} from './src/lib/scheduler';
 
 const JOBS_TABLE = 'article_jobs';
 
@@ -67,6 +73,28 @@ interface JobRow {
 
 let aiCallsThisRun = 0;
 
+/**
+ * Disjuntor de cota.
+ *
+ * O modo `wait` está certo para rate limit por MINUTO: esperar resolve. Está
+ * errado para cota por DIA: nenhuma espera de 30 segundos devolve uma cota que
+ * só volta em horas, e cada tentativa ainda conta como requisição.
+ *
+ * Descoberto testando — uma execução queimou 7 chamadas insistindo contra uma
+ * cota diária já esgotada, antes de desistir.
+ *
+ * Como os dois casos chegam com a mesma mensagem 429, a distinção é por
+ * comportamento: se uma etapa esgotou TODAS as tentativas com 429, não é
+ * congestionamento momentâneo. Aí a execução inteira para — os jobs ficam como
+ * estão e a próxima execução agendada os retoma, sem perder etapa paga.
+ */
+let quotaExhausted = false;
+
+function looksLikeQuotaExhaustion(message: unknown): boolean {
+  const text = String(message || '');
+  return /RESOURCE_EXHAUSTED/i.test(text) || /exceeded your current quota/i.test(text);
+}
+
 function startWorkerServer(): Promise<{ server: Server; baseUrl: string }> {
   return new Promise((resolve, reject) => {
     // Porta 0 = o sistema escolhe uma livre. Evita colidir com um Studio
@@ -99,6 +127,15 @@ function makeCallApi(baseUrl: string): CallApi {
 
     const json = await res.json();
     if (json?.aiUsage?.calls) aiCallsThisRun += json.aiUsage.calls;
+
+    // O sinal vem do servidor, da camada de retentativa, e não da mensagem de
+    // erro: alguns handlers engolem o 429 de propósito e respondem
+    // `success: true` degradado — a busca do gerador de pautas é um deles.
+    // Olhar só a resposta deixaria o worker insistir contra uma cota morta.
+    if (json?.aiUsage?.quotaExhausted || looksLikeQuotaExhaustion(json?.error)) {
+      quotaExhausted = true;
+    }
+
     return json;
   };
 }
@@ -153,6 +190,9 @@ async function runJob(job: JobRow, baseUrl: string) {
   const label = job.topic || job.id;
   console.log(`\n[job ${job.id}] ${label}`);
 
+  // A tentativa é contada ANTES de começar: se o processo morrer no meio (o
+  // runner do GitHub Actions pode ser interrompido), o job não fica tentando
+  // para sempre. O caso de cota esgotada devolve esta contagem no catch.
   await updateJob(job.id, { attempts: job.attempts + 1, error: null });
 
   const { blog, manifesto } = await loadBlogContext(job.blog_id);
@@ -226,17 +266,138 @@ async function runJob(job: JobRow, baseUrl: string) {
   } catch (err: any) {
     const payloads = err instanceof PipelineStepError ? err.payloads : previous;
     const step = err instanceof PipelineStepError ? err.step : 'desconhecida';
+    const isQuota = quotaExhausted || looksLikeQuotaExhaustion(err?.message);
 
-    // Salva o que já foi produzido antes de marcar como falho — é o que torna
-    // a próxima tentativa mais barata que a primeira.
+    // Cota esgotada não é culpa do job: ele volta para a fila com a tentativa
+    // devolvida. Sem isso, três dias de cota estourada abandonariam um artigo
+    // que nunca chegou a ter uma chance de verdade.
     await updateJob(job.id, {
-      state: 'failed',
+      state: isQuota ? 'queued' : 'failed',
+      attempts: isQuota ? job.attempts : job.attempts + 1,
       step_payloads: { payloads },
       ai_calls: job.ai_calls + aiCallsThisRun,
-      error: `[${step}] ${err?.message || err}`,
+      error: isQuota ? 'Cota de IA esgotada — reenfileirado.' : `[${step}] ${err?.message || err}`,
     });
 
-    console.error(`  ✗ falhou em "${step}": ${err?.message || err}`);
+    if (isQuota) {
+      quotaExhausted = true;
+      console.warn(`  ⏸ cota esgotada em "${step}" — job devolvido à fila, etapas pagas preservadas.`);
+    } else {
+      console.error(`  ✗ falhou em "${step}": ${err?.message || err}`);
+    }
+  }
+}
+
+/**
+ * Enfileira pautas novas para os blogs ativos que ainda têm espaço na semana.
+ *
+ * Este passo não existia no plano original: a máquina de estados começava em
+ * `queued` com o tópico já preenchido, e nada o preenchia. Sem ele, o worker
+ * acorda de madrugada e não sabe sobre o que escrever.
+ */
+async function planTopics(baseUrl: string) {
+  const supabase = getSupabaseAdmin();
+  const callApi = makeCallApi(baseUrl);
+
+  const { data: blogs, error } = await supabase
+    .from('blogs')
+    .select('id,name,niche')
+    .eq('active', true);
+  if (error) throw error;
+
+  for (const blog of blogs || []) {
+    // Quantos artigos já saíram nos últimos 7 dias, e quantos ainda cabem.
+    const weekAgo = new Date(Date.now() - 7 * 24 * 3600 * 1000).toISOString();
+
+    const [{ data: secret }, { count: recent }, { count: pending }] = await Promise.all([
+      supabase
+        .from('blog_secrets')
+        .select('manifesto,cadence_per_week')
+        .eq('blog_id', blog.id)
+        .maybeSingle(),
+      supabase
+        .from('article_jobs')
+        .select('id', { count: 'exact', head: true })
+        .eq('blog_id', blog.id)
+        .gte('created_at', weekAgo),
+      supabase
+        .from('article_jobs')
+        .select('id', { count: 'exact', head: true })
+        .eq('blog_id', blog.id)
+        .in('state', ['queued', 'researching', 'drafting', 'reviewing', 'imaging']),
+    ]);
+
+    const cadence = secret?.cadence_per_week ?? 2;
+    const slots = remainingThisWeek(cadence, recent ?? 0);
+
+    if (slots === 0 || (pending ?? 0) > 0) {
+      console.log(
+        `[pauta ${blog.id}] nada a enfileirar ` +
+          `(cadência ${cadence}/semana, ${recent ?? 0} na semana, ${pending ?? 0} na fila).`
+      );
+      continue;
+    }
+
+    const res = await callApi('/api/generate-topics', {
+      blogName: blog.name,
+      blogNiche: blog.niche,
+      userManifesto: secret?.manifesto || {},
+    });
+
+    // `topics` vem no topo da resposta, não em `data` — a primeira versão lia
+    // `res.data.topics` e descartava em silêncio pautas que tinham sido
+    // geradas com sucesso.
+    const candidates: TopicCandidate[] = (res?.topics || []).map((t: any) => ({
+      title: t.title || t.topic || '',
+      angle: t.angle,
+      newsHook: t.newsHook,
+      category: t.category,
+    }));
+
+    if (quotaExhausted) {
+      console.warn(`[pauta ${blog.id}] cota do dia esgotada — planejamento interrompido.`);
+      return;
+    }
+
+    if (candidates.length === 0) {
+      console.warn(`[pauta ${blog.id}] o gerador não devolveu tópicos.`);
+      continue;
+    }
+
+    // Dedup ANTES de enfileirar. Comparar depois de produzir seria descobrir
+    // o desperdício quando ele já foi pago.
+    const { data: published } = await supabase
+      .from('posts')
+      .select('title')
+      .eq('blog_id', blog.id);
+
+    const { fresh, rejected } = dedupeTopics(
+      candidates,
+      (published || []).map((p: any) => p.title)
+    );
+
+    for (const r of rejected) {
+      console.log(
+        `[pauta ${blog.id}] recusada (${r.score.toFixed(2)}): "${r.candidate.title.slice(0, 55)}" ` +
+          `≈ "${r.similarTo.slice(0, 55)}"`
+      );
+    }
+
+    const toQueue = fresh.slice(0, slots);
+    for (const topic of toQueue) {
+      const { error: insertError } = await supabase.from(JOBS_TABLE).insert({
+        blog_id: blog.id,
+        topic: topic.title,
+        state: 'queued',
+        input: buildJobInput(topic),
+      });
+      if (insertError) throw insertError;
+      console.log(`[pauta ${blog.id}] enfileirada: "${topic.title.slice(0, 60)}"`);
+    }
+
+    if (toQueue.length === 0) {
+      console.log(`[pauta ${blog.id}] todas as sugestões repetiam o acervo.`);
+    }
   }
 }
 
@@ -246,6 +407,10 @@ async function main() {
   console.log(`worker: endpoints locais em ${baseUrl}`);
 
   try {
+    if (process.env.WORKER_SKIP_PLANNING !== '1') {
+      await planTopics(baseUrl);
+    }
+
     const jobs = await claimJobs();
 
     if (jobs.length === 0) {
@@ -256,6 +421,14 @@ async function main() {
     console.log(`worker: ${jobs.length} job(s) na fila.`);
 
     for (const [index, job] of jobs.entries()) {
+      if (quotaExhausted) {
+        console.warn(
+          `worker: cota de IA do dia esgotada. ${jobs.length - index} job(s) ficam ` +
+            'para a próxima execução — nenhuma etapa paga foi perdida.'
+        );
+        break;
+      }
+
       if (aiCallsThisRun >= MAX_AI_CALLS) {
         console.warn(
           `worker: teto de ${MAX_AI_CALLS} chamadas de IA atingido. ` +

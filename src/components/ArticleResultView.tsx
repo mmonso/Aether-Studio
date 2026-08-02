@@ -2032,7 +2032,7 @@ ${displayedText
       <footer className="mt-12 pt-8 border-t border-stone-200">
         <div className="bg-stone-900 text-stone-100 rounded-2xl p-6 space-y-4">
           <h4 className="font-serif font-bold text-lg text-amber-300">
-            Perguntas para Reflexão Psicoterapêutica
+            Perguntas para Reflexão
           </h4>
           <ol className="list-decimal pl-5 space-y-2 text-sm text-stone-200">
             <li>Como este tema se conecta com situações do seu momento atual?</li>
@@ -2069,11 +2069,16 @@ export default ArticlePostComponent;`;
                     seoMetaDescription: post.review?.metaDescription || '',
                     socialCaption: post.review?.socialCaption || '',
                     bodyMarkdown: displayedText,
+                    // Perguntas neutras de nicho. As anteriores eram resíduo do
+                    // pivô de psicologia — falavam em "o que você percebe em seu
+                    // corpo" e "sua próxima sessão de terapia", num blog de
+                    // tecnologia. Trocar por perguntas sobre software repetiria
+                    // o erro no próximo blog.
                     reflectionQuestions: [
-                      'Como este tema se conecta com situações concretas do seu momento atual?',
-                      'O que você percebe em seu corpo ao refletir sobre as contradições expostas neste texto?',
-                      'Que sentimentos surgem ao acolher essa experiência sem pressa de solucioná-la?',
-                      'Que pergunta você gostaria de levar para a sua próxima sessão de terapia sobre este assunto?',
+                      'Como este tema se conecta com algo concreto que você enfrenta hoje?',
+                      'Que suposição sua o texto colocou em dúvida?',
+                      'O que você faria de diferente a partir daqui?',
+                      'Que pergunta ficou sem resposta e vale investigar depois?',
                     ],
                   },
                   null,
@@ -2098,17 +2103,17 @@ metaDescription: ${JSON.stringify(post.review?.metaDescription || '')}
 ${displayedSubtitle ? `*${displayedSubtitle}*\n` : ''}
 ${displayedText}
 
-## Perguntas para Reflexão Psicoterapêutica
+## Perguntas para Reflexão
 
-1. Como este tema se conecta com situações concretas do seu momento atual?
-2. O que você percebe em seu corpo ao refletir sobre as contradições expostas neste texto?
-3. Que sentimentos surgem ao acolher essa experiência sem pressa de solucioná-la?
-4. Que pergunta você gostaria de levar para a sua próxima sessão de terapia sobre este assunto?
+1. Como este tema se conecta com algo concreto que você enfrenta hoje?
+2. Que suposição sua o texto colocou em dúvida?
+3. O que você faria de diferente a partir daqui?
+4. Que pergunta ficou sem resposta e vale investigar depois?
 `;
               } else if (reactExportFormat === 'html') {
                 formatTitle = 'HTML Semântico Sanitizado';
                 formatDescription = 'Para ser renderizado via dangerouslySetInnerHTML={{ __html: ... }} no seu React.';
-                codeText = `<article class="psico-article">
+                codeText = `<article class="article">
   <h1>${displayedTitle}</h1>
   ${displayedSubtitle ? `<p class="subtitle"><em>${displayedSubtitle}</em></p>` : ''}
   <p class="meta">Por ${manifesto.authorName || 'Psicólogo(a)'} • ${new Date(post.createdAt).toLocaleDateString('pt-BR')} • ${post.review?.readingTimeMinutes || 4} min de leitura</p>

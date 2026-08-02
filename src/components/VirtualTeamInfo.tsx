@@ -219,7 +219,7 @@ export const VirtualTeamInfo: React.FC<VirtualTeamInfoProps> = ({
 
           <div className="bg-stone-800/80 p-3.5 rounded-2xl border border-stone-700/60 space-y-1">
             <span className="text-cyan-400 font-bold block">2. Análise dos 3 Especialistas</span>
-            <p className="text-stone-400">Humanizador, Curador Conceitual e Revisor Clínico emitem pareceres.</p>
+            <p className="text-stone-400">Humanizador, Curador Conceitual e Revisor Editorial emitem pareceres.</p>
           </div>
 
           <div className="bg-stone-800/80 p-3.5 rounded-2xl border border-stone-700/60 space-y-1">

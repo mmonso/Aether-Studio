@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Navbar } from './components/Navbar';
+import { Navbar, type StudioTab } from './components/Navbar';
 import { CreatePostTab } from './components/CreatePostTab';
 import { PipelineTracker } from './components/PipelineTracker';
 import { ArticleResultView } from './components/ArticleResultView';
 import { ManifestoEditor } from './components/ManifestoEditor';
 import { ArticleHistoryTab } from './components/ArticleHistoryTab';
+import { ApprovalInbox } from './components/ApprovalInbox';
 import { VirtualTeamInfo } from './components/VirtualTeamInfo';
 import { BlogManagerModal } from './components/BlogManagerModal';
 import { SupabaseSyncModal } from './components/SupabaseSyncModal';
@@ -45,7 +46,7 @@ import {
 } from './lib/pipeline';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'create' | 'manifesto' | 'history' | 'team'>('create');
+  const [activeTab, setActiveTab] = useState<StudioTab>('create');
 
   // Theme state ('light' | 'dark')
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
@@ -527,6 +528,23 @@ export default function App() {
   };
 
   // Handle delete post from history
+  /**
+   * Descartar e recuperar.
+   *
+   * Descartado não é apagado: o artigo fica em `rejected`, com o parecer da
+   * triagem junto. É o que permite discordar depois — e é desse desacordo que
+   * sai a calibração do crítico automático.
+   */
+  const handleRejectPost = (post: ArticlePost) => {
+    persistArticle({ ...post, status: 'rejected', updatedAt: new Date().toISOString() });
+    addToast('info', 'Artigo descartado', 'Ele continua no histórico, marcado como reprovado.');
+  };
+
+  const handleRestorePost = (post: ArticlePost) => {
+    persistArticle({ ...post, status: 'completed', updatedAt: new Date().toISOString() });
+    addToast('success', 'Artigo recuperado', 'Voltou para a fila de aprovação.');
+  };
+
   const handleDeletePost = (id: string) => {
     if (window.confirm('Excluir este artigo do histórico?')) {
       setPosts((prev) => prev.filter((p) => p.id !== id));
@@ -582,6 +600,7 @@ export default function App() {
           }
         }}
         savedCount={posts.length}
+        pendingCount={posts.filter((p) => p.status === 'completed' && !p.isPublished).length}
         theme={theme}
         onToggleTheme={toggleTheme}
         activeBlog={activeBlog}
@@ -646,6 +665,20 @@ export default function App() {
           <ManifestoEditor
             manifesto={manifesto}
             onSave={handleSaveManifesto}
+          />
+        )}
+
+        {/* VIEW 2b: CAIXA DE ENTRADA DA APROVAÇÃO */}
+        {activeTab === 'inbox' && (
+          <ApprovalInbox
+            posts={posts}
+            onSelectPost={(post) => {
+              setCurrentPost(post);
+              setActiveTab('create');
+            }}
+            onPublish={(post) => handleOpenSupabaseModal(post)}
+            onReject={handleRejectPost}
+            onRestore={handleRestorePost}
           />
         )}
 

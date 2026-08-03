@@ -20,8 +20,17 @@ import {
   Database,
   Zap,
   Download,
+  Inbox,
 } from 'lucide-react';
 import { Blog } from '../types';
+
+/**
+ * As abas do Studio, num lugar só.
+ *
+ * Estava escrito por extenso em quatro lugares — a prop, o setter, o
+ * handler e o App —, então acrescentar uma aba exigia lembrar dos quatro.
+ */
+export type StudioTab = 'create' | 'manifesto' | 'inbox' | 'history' | 'team';
 
 // URL do blog público, por blog.
 //
@@ -40,8 +49,10 @@ function resolveBlogUrl(blog?: Blog): string {
 }
 
 interface NavbarProps {
-  activeTab: 'create' | 'manifesto' | 'history' | 'team';
-  setActiveTab: (tab: 'create' | 'manifesto' | 'history' | 'team') => void;
+  activeTab: StudioTab;
+  setActiveTab: (tab: StudioTab) => void;
+  /** Quantos artigos esperam decisão sua. Aparece como marcador na aba. */
+  pendingCount?: number;
   savedCount: number;
   theme: 'light' | 'dark';
   onToggleTheme: () => void;
@@ -57,6 +68,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeTab,
   setActiveTab,
   savedCount,
+  pendingCount,
   theme,
   onToggleTheme,
   activeBlog,
@@ -84,6 +96,16 @@ export const Navbar: React.FC<NavbarProps> = ({
       icon: Heart,
     },
     {
+      id: 'inbox' as const,
+      label: 'Aprovação',
+      subtitle:
+        pendingCount === undefined || pendingCount === 0
+          ? 'Fila vazia'
+          : `${pendingCount} esperando você`,
+      icon: Inbox,
+      badge: pendingCount ? pendingCount : null,
+    },
+    {
       id: 'history' as const,
       label: 'Histórico de Artigos',
       subtitle: `${savedCount} texto(s) arquivado(s)`,
@@ -100,7 +122,7 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const activeNavItem = navItems.find((item) => item.id === activeTab) || navItems[0];
 
-  const handleNavClick = (tab: 'create' | 'manifesto' | 'history' | 'team') => {
+  const handleNavClick = (tab: StudioTab) => {
     setActiveTab(tab);
     setMobileMenuOpen(false);
   };

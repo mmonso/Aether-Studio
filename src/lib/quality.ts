@@ -398,26 +398,53 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
 // ---------------------------------------------------------------------------
 
 /**
- * Extrai as afirmações numéricas do texto, na forma normalizada.
+ * Unidades que transformam um número em medição.
  *
- * Só entram números que afirmam alguma coisa: com unidade, com percentual, ou
- * com dois dígitos ou mais. `1.` de lista numerada e "3 passos" ficam de fora —
- * senão o detector viraria ruído e ninguém olharia para ele.
+ * A lista é o coração do detector, e a fronteira foi aprendida na prática: a
+ * primeira versão acusava qualquer número novo de dois dígitos, e a primeira
+ * execução real reprovou um artigo por causa de "503" — um código HTTP citado
+ * no texto, não um dado inventado.
+ *
+ * Daí a regra: número com unidade é medição e precisa de origem; número solto
+ * pode ser código de status, ano, porta ou versão, e aparece legitimamente
+ * quando um parágrafo é reescrito. Veto que dispara errado é veto que alguém
+ * desliga.
+ */
+const QUANTITY_UNITS = [
+  '%',
+  'ms',
+  's',
+  'min',
+  'h',
+  'GB',
+  'MB',
+  'TB',
+  'KB',
+  'GHz',
+  'MHz',
+  'fps',
+  'W',
+  'x',
+  'tokens?/s',
+  'req/s',
+  'mil',
+  'milh(?:ão|ões)',
+  'bilh(?:ão|ões)',
+  'vezes',
+  'pontos percentuais',
+].join('|');
+
+/**
+ * Extrai as MEDIÇÕES do texto: número acompanhado de unidade ou percentual.
+ *
+ * Número sem unidade fica de fora de propósito — ver `QUANTITY_UNITS`.
  */
 export function numericClaims(text: string): string[] {
   const withoutCode = text.replace(/```[\s\S]*?```/g, ' ');
-  const matches =
-    withoutCode.match(/\d[\d.,]*\s*(?:%|ms|s\b|GB|MB|TB|KB|GHz|MHz|x\b|k\b|tokens?\/s)?/gi) || [];
+  const pattern = new RegExp(`\\d[\\d.,]*\\s*(?:${QUANTITY_UNITS})(?![\\wÀ-ú])`, 'gi');
+  const matches = withoutCode.match(pattern) || [];
 
-  const claims = matches
-    .map((m) => m.replace(/\s+/g, '').replace(/[.,]$/, '').toLowerCase())
-    .filter((m) => {
-      const digits = (m.match(/\d/g) || []).length;
-      const hasUnit = /[a-z%]/.test(m);
-      return digits >= 2 || hasUnit;
-    });
-
-  return [...new Set(claims)];
+  return [...new Set(matches.map((m) => m.replace(/\s+/g, '').replace(/[.,]$/, '').toLowerCase()))];
 }
 
 /**

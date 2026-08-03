@@ -174,6 +174,22 @@ test('número apurado com fonte não conta como invenção', () => {
   assert.deepEqual(detectInventedNumbers(depois, antes, evidencia), []);
 });
 
+test('código HTTP citado numa reescrita não é dado inventado', () => {
+  // Caso real: a primeira execução do worker com a triagem ligada reprovou um
+  // artigo porque o reparo passou a citar o erro 503. Número sem unidade não é
+  // medição — é código de status, ano, porta ou versão.
+  const antes = 'A chamada falha e o cliente tenta de novo.';
+  const depois = 'A chamada devolve 503 e o cliente tenta de novo, agora contra a porta 8080.';
+  assert.deepEqual(detectInventedNumbers(depois, antes), []);
+});
+
+test('grandeza escrita por extenso também conta como medição', () => {
+  const antes = 'O modelo é grande.';
+  const depois = 'O modelo tem 70 bilhões de parâmetros e responde 3 vezes mais rápido.';
+  const invented = detectInventedNumbers(depois, antes);
+  assert.ok(invented.length >= 2, JSON.stringify(invented));
+});
+
 test('numeração de lista e contagem trivial não viram alarme', () => {
   const antes = 'Três pontos importam.';
   const depois = '1. Primeiro ponto.\n2. Segundo ponto.\n3. Terceiro ponto.';

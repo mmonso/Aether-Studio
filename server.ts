@@ -1415,10 +1415,44 @@ function articleToJobRow(article: any) {
   };
 }
 
+/**
+ * Reconstrói o ArticlePost a partir da linha do job.
+ *
+ * A coluna `step_payloads` tem DUAS formas legítimas, porque tem dois autores:
+ *
+ *   { article }  — o Studio grava o ArticlePost inteiro, com os campos de
+ *                  interface (tags escolhidas à mão, slug publicado, etc.)
+ *   { payloads } — o worker grava só o resultado de cada etapa do pipeline,
+ *                  que é o formato que a retomada precisa.
+ *
+ * Ler só a primeira fazia os artigos produzidos pelo worker aparecerem VAZIOS
+ * no histórico — sem título, sem texto. A fila de aprovação, que é o centro da
+ * decisão D3, mostraria uma lista de nada.
+ */
 function jobRowToArticle(row: any) {
-  const article = row.step_payloads?.article || {};
+  const stored = row.step_payloads || {};
+  const article = stored.article || {};
+  const payloads = stored.payloads;
+
+  const fromPayloads = payloads
+    ? {
+        topic: row.topic,
+        input: row.input,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+        draft: payloads.draft,
+        review: payloads.review,
+        image: payloads.image,
+        factCheck: payloads.factcheck ?? undefined,
+        tone: '',
+        depthLevel: row.input?.depthLevel || '',
+        targetAudience: row.input?.targetAudience || '',
+      }
+    : {};
+
   return {
-    ...article,
+    ...fromPayloads,
+    ...article, // o que o Studio salvou tem prioridade: é edição humana
     id: row.id,
     blogId: row.blog_id,
     status: STATE_TO_STATUS[row.state] || article.status || 'completed',

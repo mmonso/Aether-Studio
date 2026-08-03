@@ -394,6 +394,54 @@ function countOccurrences(haystack: string, needle: string): number {
 const round2 = (n: number) => Math.round(n * 100) / 100;
 
 // ---------------------------------------------------------------------------
+// Números inventados
+// ---------------------------------------------------------------------------
+
+/**
+ * Extrai as afirmações numéricas do texto, na forma normalizada.
+ *
+ * Só entram números que afirmam alguma coisa: com unidade, com percentual, ou
+ * com dois dígitos ou mais. `1.` de lista numerada e "3 passos" ficam de fora —
+ * senão o detector viraria ruído e ninguém olharia para ele.
+ */
+export function numericClaims(text: string): string[] {
+  const withoutCode = text.replace(/```[\s\S]*?```/g, ' ');
+  const matches =
+    withoutCode.match(/\d[\d.,]*\s*(?:%|ms|s\b|GB|MB|TB|KB|GHz|MHz|x\b|k\b|tokens?\/s)?/gi) || [];
+
+  const claims = matches
+    .map((m) => m.replace(/\s+/g, '').replace(/[.,]$/, '').toLowerCase())
+    .filter((m) => {
+      const digits = (m.match(/\d/g) || []).length;
+      const hasUnit = /[a-z%]/.test(m);
+      return digits >= 2 || hasUnit;
+    });
+
+  return [...new Set(claims)];
+}
+
+/**
+ * Números que apareceram na correção e não existiam em lugar nenhum antes.
+ *
+ * Isto não é zelo teórico. Ao rodar o ciclo completo contra um artigo real, o
+ * crítico pediu "dados empíricos"; o redator obedeceu e INVENTOU um benchmark
+ * completo — com números, unidades e um erro de cálculo junto. A instrução no
+ * prompt dizia explicitamente para não inventar e registrar o que faltasse em
+ * `unresolved`: voltou com zero itens em `unresolved` e o benchmark fabricado.
+ *
+ * Pedir evidência a quem não tem fonte produz evidência falsa. Instrução não
+ * resolve isso; comparação de strings resolve.
+ */
+export function detectInventedNumbers(
+  after: string,
+  before: string,
+  evidence = ''
+): string[] {
+  const known = new Set([...numericClaims(before), ...numericClaims(evidence)]);
+  return numericClaims(after).filter((claim) => !known.has(claim));
+}
+
+// ---------------------------------------------------------------------------
 // Termos proibidos do manifesto
 // ---------------------------------------------------------------------------
 

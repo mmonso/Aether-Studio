@@ -38,6 +38,7 @@ import {
   runPipeline,
   browserCallApi,
   PipelineStepError,
+  PipelineRejection,
   PIPELINE_STEPS,
   type PipelineStep,
   type StepPayloads,
@@ -363,6 +364,7 @@ export default function App() {
       factcheck: 'researching',
       draft: 'drafting',
       review: 'reviewing',
+      audit: 'auditing',
       image: 'generating_image',
     };
 
@@ -387,6 +389,7 @@ export default function App() {
         factCheck: payloads.factcheck ?? undefined,
         draft: payloads.draft,
         review: payloads.review,
+        audit: payloads.audit,
         image: payloads.image,
         status,
         updatedAt: new Date().toISOString(),
@@ -403,6 +406,10 @@ export default function App() {
           blogNiche: activeBlog.niche,
           manifesto,
           visualStyle: VISUAL_STYLES.find((s) => s.id === input.visualStyle) || VISUAL_STYLES[0],
+          // No Studio a triagem informa, não barra: você está na frente da tela
+          // e é a instância de aprovação. Quem precisa do veto automático é o
+          // worker, que roda de madrugada sem ninguém para julgar.
+          audit: { rejectOnFailure: false },
         },
         callApi: browserCallApi,
         onStepStart: (step) => setCurrentPost((cur) => (cur ? { ...cur, status: STEP_STATUS[step] } : cur)),
@@ -419,7 +426,12 @@ export default function App() {
     } catch (err: any) {
       // O que já foi produzido vem junto no erro e é salvo — é o que permite
       // retomar em vez de repagar.
-      if (err instanceof PipelineStepError) {
+      if (err instanceof PipelineRejection) {
+        // Não deveria chegar aqui com `rejectOnFailure: false`, mas se a
+        // política mudar, reprovado continua sendo resultado — nunca erro.
+        applyPayloads(err.payloads, 'rejected');
+        addToast('error', 'Reprovado na triagem', err.report.reason || '');
+      } else if (err instanceof PipelineStepError) {
         applyPayloads(err.payloads, 'error');
         article = { ...article, errorMessage: err.message };
         setCurrentPost(article);
@@ -594,6 +606,7 @@ export default function App() {
                 factCheckResult={currentPost.factCheck}
                 draftResult={currentPost.draft}
                 reviewResult={currentPost.review}
+                auditResult={currentPost.audit}
                 imageResult={currentPost.image}
                 authorName={manifesto.authorName}
                 topic={currentPost.topic}

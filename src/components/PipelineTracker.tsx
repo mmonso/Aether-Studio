@@ -1,13 +1,14 @@
 import React from 'react';
-import { Feather, ShieldCheck, Palette, CheckCircle2, Loader2, Sparkles, AlertCircle, Heart, SearchCheck, Globe } from 'lucide-react';
-import { DraftResult, ReviewResult, ImageResult, FactCheckReport } from '../types';
+import { Feather, ShieldCheck, Palette, CheckCircle2, Loader2, Sparkles, AlertCircle, Heart, SearchCheck, Gavel } from 'lucide-react';
+import { DraftResult, ReviewResult, ImageResult, FactCheckReport, ArticlePost } from '../types';
 
 interface PipelineTrackerProps {
-  status: 'researching' | 'drafting' | 'reviewing' | 'generating_image' | 'completed' | 'error';
+  status: ArticlePost['status'];
   errorMessage?: string;
   factCheckResult?: FactCheckReport;
   draftResult?: DraftResult;
   reviewResult?: ReviewResult;
+  auditResult?: ArticlePost['audit'];
   imageResult?: ImageResult;
   authorName?: string;
   topic: string;
@@ -20,6 +21,7 @@ export const PipelineTracker: React.FC<PipelineTrackerProps> = ({
   factCheckResult,
   draftResult,
   reviewResult,
+  auditResult,
   imageResult,
   authorName,
   topic,
@@ -57,8 +59,17 @@ export const PipelineTracker: React.FC<PipelineTrackerProps> = ({
       hasData: !!reviewResult,
     },
     {
+      id: 'auditing',
+      title: 'Etapa 3: Triagem — Verificação Objetiva & Crítico',
+      agent: 'Verificador sem IA • Crítico do Nicho • Redator (reparo)',
+      icon: Gavel,
+      description:
+        'Medindo marcas de texto de máquina por contagem, e submetendo o artigo à crítica mais dura que um especialista faria...',
+      hasData: !!auditResult,
+    },
+    {
       id: 'generating_image',
-      title: 'Etapa 3: Ilustração Editorial',
+      title: 'Etapa 4: Ilustração Editorial',
       agent: 'Designer Editorial • Capa Conceitual',
       icon: Palette,
       description: 'Criando metáfora visual poética e gerando imagem de capa via Gemini Imagen...',
@@ -66,31 +77,24 @@ export const PipelineTracker: React.FC<PipelineTrackerProps> = ({
     },
   ];
 
+  /**
+   * Antes eram quatro blocos `if` que comparavam status com o passo seguinte —
+   * e por isso "revisão" só ficava concluída quando o status virava
+   * `generating_image` especificamente. Acrescentar a triagem no meio quebrava
+   * silenciosamente. A ordem é o dado; comparar posição resolve para sempre.
+   */
+  const ORDER = ['researching', 'drafting', 'reviewing', 'auditing', 'generating_image'];
+
   const getStepStatus = (stepId: string) => {
     if (status === 'error') return 'error';
     if (status === 'completed') return 'done';
+    if (status === 'rejected') return stepId === 'auditing' ? 'error' : 'done';
 
-    if (stepId === 'researching') {
-      if (status === 'researching') return 'active';
-      return factCheckResult ? 'done' : 'pending';
-    }
-
-    if (stepId === 'drafting') {
-      if (status === 'drafting') return 'active';
-      return draftResult ? 'done' : 'pending';
-    }
-
-    if (stepId === 'reviewing') {
-      if (status === 'reviewing') return 'active';
-      if (status === 'generating_image') return 'done';
-      return 'pending';
-    }
-
-    if (stepId === 'generating_image') {
-      if (status === 'generating_image') return 'active';
-      return 'pending';
-    }
-
+    const here = ORDER.indexOf(stepId);
+    const now = ORDER.indexOf(status);
+    if (now === -1 || here === -1) return 'pending';
+    if (here < now) return 'done';
+    if (here === now) return 'active';
     return 'pending';
   };
 

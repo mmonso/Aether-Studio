@@ -6,6 +6,7 @@ import {
   splitSentences,
   splitProhibitedTerms,
   prepareText,
+  detectInventedNumbers,
 } from './quality';
 
 // --- separação de frases ---------------------------------------------------
@@ -149,6 +150,40 @@ test('concretude vira veto quando o blog exige', () => {
     requireConcreteness: true,
   });
   assert.equal(audit.passed, false);
+});
+
+// --- números inventados ----------------------------------------------------
+
+test('número que já existia no texto original não é invenção', () => {
+  const antes = 'A latência caiu de 800 ms para 120 ms.';
+  const depois = 'Depois do ajuste, a latência caiu de 800 ms para 120 ms — metade do esperado.';
+  assert.deepEqual(detectInventedNumbers(depois, antes), []);
+});
+
+test('benchmark que apareceu do nada na correção é acusado', () => {
+  const antes = 'O modelo responde rápido o suficiente para leitura confortável.';
+  const depois = 'O modelo entrega 5-8 tokens/s, contra 45% da linha de base medida.';
+  const invented = detectInventedNumbers(depois, antes);
+  assert.ok(invented.length >= 2, `esperava números novos, veio ${JSON.stringify(invented)}`);
+});
+
+test('número apurado com fonte não conta como invenção', () => {
+  const antes = 'A adoção cresceu no último ano.';
+  const depois = 'A adoção cresceu 40% no último ano.';
+  const evidencia = JSON.stringify({ verifiedFacts: ['Crescimento de 40% segundo o relatório'] });
+  assert.deepEqual(detectInventedNumbers(depois, antes, evidencia), []);
+});
+
+test('numeração de lista e contagem trivial não viram alarme', () => {
+  const antes = 'Três pontos importam.';
+  const depois = '1. Primeiro ponto.\n2. Segundo ponto.\n3. Terceiro ponto.';
+  assert.deepEqual(detectInventedNumbers(depois, antes), []);
+});
+
+test('número dentro de bloco de código não é afirmação factual', () => {
+  const antes = 'O ajuste foi no lote.';
+  const depois = 'O ajuste foi no lote.\n\n```js\nconst BATCH = 512;\nconst TIMEOUT = 3000;\n```';
+  assert.deepEqual(detectInventedNumbers(depois, antes), []);
 });
 
 // --- veredito --------------------------------------------------------------

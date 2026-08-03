@@ -19,6 +19,7 @@ import { app, getSupabaseAdmin } from './server';
 import {
   runPipeline,
   PipelineStepError,
+  PipelineRejection,
   type CallApi,
   type StepPayloads,
 } from './src/lib/pipeline';
@@ -70,8 +71,22 @@ const STEP_STATE: Record<string, string> = {
   factcheck: 'researching',
   draft: 'drafting',
   review: 'reviewing',
+  audit: 'auditing',
   image: 'imaging',
 };
+
+/**
+ * Nota mínima do crítico para o artigo chegar na caixa de entrada.
+ *
+ * Aqui o veto é REAL, diferente do Studio: de madrugada não há ninguém para
+ * julgar, e a decisão D3 diz que a fila de aprovação só recebe o que passou na
+ * triagem. Artigo reprovado fica em `rejected` com o parecer gravado — não vira
+ * rascunho no blog.
+ */
+const AUDIT_MIN_SCORE = envNumber('WORKER_AUDIT_MIN_SCORE', 7);
+
+/** Quantas vezes o texto pode voltar ao redator com a crítica. Cada uma custa. */
+const AUDIT_MAX_REPAIRS = envNumber('WORKER_AUDIT_MAX_REPAIRS', 1);
 
 interface JobRow {
   id: string;
@@ -203,7 +218,7 @@ async function claimJobs(): Promise<JobRow[]> {
     .select('*')
     // Estados retomáveis: nunca começou, ou parou no meio. Um job em 'ready'
     // já produziu e está esperando aprovação — não se toca.
-    .in('state', ['queued', 'researching', 'drafting', 'reviewing', 'imaging', 'failed'])
+    .in('state', ['queued', 'researching', 'drafting', 'reviewing', 'auditing', 'imaging', 'failed'])
     .lt('attempts', MAX_ATTEMPTS)
     .order('created_at', { ascending: true })
     .limit(MAX_JOBS);
@@ -247,6 +262,11 @@ async function runJob(job: JobRow, baseUrl: string) {
         manifesto,
         visualStyle:
           VISUAL_STYLES.find((s) => s.id === job.input?.visualStyle) || VISUAL_STYLES[0],
+        audit: {
+          minScore: AUDIT_MIN_SCORE,
+          maxRepairs: AUDIT_MAX_REPAIRS,
+          rejectOnFailure: true,
+        },
       },
       callApi,
       payloads: previous,
@@ -295,8 +315,29 @@ async function runJob(job: JobRow, baseUrl: string) {
       error: null,
     });
 
-    console.log(`  ✓ rascunho gravado: ${publishRes.slug}`);
+    const audit = payloads.audit;
+    console.log(
+      `  ✓ rascunho gravado: ${publishRes.slug}` +
+        (audit ? ` (triagem ${audit.score}/10, ${audit.repairs} reparo(s))` : '')
+    );
   } catch (err: any) {
+    // Reprovado na triagem é resultado, não falha. Não vira `failed`, não gera
+    // alerta de infraestrutura, não volta para a fila — e o parecer, que custou
+    // chamada, fica gravado para a calibração da F5 e para você discordar dele.
+    if (err instanceof PipelineRejection) {
+      await updateJob(job.id, {
+        state: 'rejected',
+        step_payloads: { payloads: err.payloads },
+        ai_calls: jobCalls(),
+        error: err.report.reason || 'Reprovado na triagem.',
+      });
+      const nota = err.report.critique?.score;
+      console.warn(
+        `  ⊘ reprovado${nota !== undefined ? ` (nota ${nota}/10)` : ''}: ${err.report.reason}`
+      );
+      return;
+    }
+
     const payloads = err instanceof PipelineStepError ? err.payloads : previous;
     const step = err instanceof PipelineStepError ? err.step : 'desconhecida';
     const isQuota = quotaExhausted || looksLikeQuotaExhaustion(err?.message);

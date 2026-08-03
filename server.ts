@@ -959,6 +959,267 @@ ${draftText}`;
   }
 });
 
+// 2b. CRÍTICO — a etapa que reprova, e que não reescreve nada
+//
+// Por que é um endpoint separado do comitê editorial acima: o comitê revisa e
+// REESCREVE no mesmo passo, e quem reescreve nunca reprova o próprio trabalho.
+// O crítico não tem acesso à caneta. Ele só pontua e ordena problemas. Isso
+// também é o que permite o veto ser um número — `score` e `wouldPublish` — em
+// vez de um parecer em prosa que ninguém consegue ler por código.
+app.post('/api/critique-draft', async (req, res) => {
+  try {
+    const ai = getGeminiClient();
+    const {
+      topic,
+      title,
+      subtitle,
+      text,
+      blogName,
+      blogNiche,
+      userManifesto,
+      factCheck,
+      // O que a verificação determinística já achou: o crítico não deve gastar
+      // atenção recontando conector, e as regras que o código não sabe checar
+      // chegam aqui como responsabilidade dele.
+      deterministicFindings,
+      unverifiableRules,
+    } = req.body;
+
+    const bName = blogName || 'Blog Especializado';
+    const bNiche = blogNiche || 'Conteúdo Editorial';
+    const authorName = userManifesto?.authorName || 'Autor(a)';
+    const audience = userManifesto?.targetAudienceDescription || 'Leitor especializado no nicho';
+    const worldview = userManifesto?.worldviewDescription || '';
+    const ethicsRules = userManifesto?.ethicsRules || '';
+
+    const alreadyFound = Array.isArray(deterministicFindings) && deterministicFindings.length
+      ? `\nO QUE A VERIFICAÇÃO AUTOMÁTICA JÁ MEDIU (não repita, não recontagem):\n` +
+        deterministicFindings
+          .map((f: any) => `- [${f.severity}] ${f.message}`)
+          .join('\n')
+      : '';
+
+    const rulesToJudge = Array.isArray(unverifiableRules) && unverifiableRules.length
+      ? `\nREGRAS DO MANIFESTO QUE SÓ VOCÊ PODE JULGAR (o código não consegue):\n` +
+        unverifiableRules.map((r: string) => `- ${r}`).join('\n')
+      : '';
+
+    const factContext = factCheck
+      ? `\nAPURAÇÃO DISPONÍVEL: confiabilidade ${factCheck.credibilityScore}% (${factCheck.verdict}).` +
+        `\nFatos confirmados: ${Array.isArray(factCheck.verifiedFacts) ? factCheck.verifiedFacts.join('; ') : '—'}` +
+        `\nAfirmações NÃO confirmadas: ${Array.isArray(factCheck.unverifiedClaimsOrRumors) ? factCheck.unverifiedClaimsOrRumors.join('; ') : '—'}`
+      : '\nNão houve apuração com fontes para este artigo. Trate afirmações factuais sem origem declarada como problema.';
+
+    const systemPrompt = `Você é o crítico mais duro que este artigo vai encontrar — o especialista de "${bNiche}" que leria isto e diria em público o que está errado.
+
+Você NÃO reescreve. Você NÃO sugere texto novo. Você aponta problemas, ordenados do mais grave para o menos grave, e dá uma nota.
+
+CONTEXTO
+- Blog: "${bName}", nicho "${bNiche}", assinado por ${authorName}.
+- Quem lê: ${audience}
+${worldview ? `- Linha editorial do autor: ${worldview}` : ''}
+${ethicsRules ? `- Limites éticos: ${ethicsRules}` : ''}
+${factContext}
+${alreadyFound}
+${rulesToJudge}
+
+COMO CRITICAR
+1. Procure o que um especialista rejeitaria: afirmação sem sustentação, analogia que não se sustenta, conclusão que não decorre do que veio antes, obviedade vendida como descoberta, precisão técnica falsa.
+2. Cada problema precisa CITAR o trecho. Crítica sem endereço é inútil.
+3. Ordene por gravidade real para ESTE leitor. O rank 1 é o que mais compromete o artigo.
+4. Diga o que fazer ("fix"), não o texto pronto.
+5. Aponte também o ponto MAIS FORTE do artigo. Quem for corrigir precisa saber o que não pode destruir.
+
+A NOTA
+- 0 a 10, onde 7 é o mínimo que o autor assinaria sem constrangimento.
+- Seja severo. Um texto competente e sem erro, mas que não diz nada que o leitor já não soubesse, não passa de 6.
+- "wouldPublish": você deixaria isto sair com o nome de ${authorName} nele?
+
+Não elogie por educação. O autor pediu a crítica, não o afago.`;
+
+    const userPrompt = `TEMA: ${topic}
+TÍTULO: ${title}
+SUBTÍTULO: ${subtitle}
+
+ARTIGO:
+${text}`;
+
+    const critiqueSchema = {
+      type: Type.OBJECT,
+      properties: {
+        score: { type: Type.NUMBER, description: 'Nota de 0 a 10. 7 é o mínimo publicável.' },
+        wouldPublish: { type: Type.BOOLEAN },
+        verdict: { type: Type.STRING, description: 'Uma frase sobre o artigo como um todo.' },
+        strongestPoint: { type: Type.STRING, description: 'O que o artigo tem de melhor e não pode ser perdido numa correção.' },
+        problems: {
+          type: Type.ARRAY,
+          description: 'Problemas ordenados por gravidade, do pior para o menos grave. No máximo 8.',
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              rank: { type: Type.NUMBER, description: '1 é o mais grave. Sem empate.' },
+              severity: { type: Type.STRING, description: 'grave, medio ou leve' },
+              area: { type: Type.STRING, description: 'argumento, evidencia, voz, estrutura ou precisao' },
+              what: { type: Type.STRING, description: 'O problema em uma frase.' },
+              where: { type: Type.STRING, description: 'Trecho citado do artigo onde o problema está.' },
+              why: { type: Type.STRING, description: 'Por que isso compromete o artigo para este leitor.' },
+              fix: { type: Type.STRING, description: 'O que fazer. Instrução, não texto pronto.' },
+            },
+            required: ['rank', 'severity', 'area', 'what', 'where', 'why', 'fix'],
+          },
+        },
+      },
+      required: ['score', 'wouldPublish', 'verdict', 'strongestPoint', 'problems'],
+    };
+
+    const critiqueCall = (mName: string) =>
+      ai.models.generateContent({
+        model: mName,
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: critiqueSchema,
+        },
+      });
+
+    const response = await runModelStep('auditor', critiqueCall, { label: 'Crítico' });
+    const parsed = JSON.parse(response.text || '{}');
+
+    // O ranqueamento é contrato, não sugestão: quem consome corta os N
+    // primeiros. Se o modelo devolver ranks repetidos ou fora de ordem, a
+    // ordenação aqui é o que garante que "os três primeiros" signifique algo.
+    const problems = Array.isArray(parsed.problems)
+      ? [...parsed.problems]
+          .sort((a: any, b: any) => (Number(a?.rank) || 99) - (Number(b?.rank) || 99))
+          .map((p: any, i: number) => ({ ...p, rank: i + 1 }))
+      : [];
+
+    res.json({
+      success: true,
+      data: {
+        ...parsed,
+        score: clampScore(parsed.score),
+        wouldPublish: parsed.wouldPublish === true,
+        problems,
+      },
+    });
+  } catch (error: any) {
+    console.error('Error critiquing draft:', error);
+    res.status(500).json({ success: false, error: error.message || 'Falha ao criticar o artigo.' });
+  }
+});
+
+/** Nota fora da escala é erro do modelo, não licença poética. */
+function clampScore(raw: any): number {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.min(10, Math.round(n * 10) / 10));
+}
+
+// 2c. REPARO — o redator recebe a crítica ranqueada e só ela
+//
+// O risco registrado no checklist é "excesso de críticos apaga a voz autoral".
+// A defesa é dupla: só os primeiros problemas da lista chegam aqui, e o texto
+// volta com instrução explícita de não reescrever o que não foi apontado.
+app.post('/api/apply-critique', async (req, res) => {
+  try {
+    const ai = getGeminiClient();
+    const {
+      title,
+      subtitle,
+      text,
+      problems,
+      strongestPoint,
+      blogName,
+      blogNiche,
+      userManifesto,
+    } = req.body;
+
+    const list = Array.isArray(problems) ? problems : [];
+    if (list.length === 0) {
+      res.status(400).json({ success: false, error: 'Nenhum problema para corrigir.' });
+      return;
+    }
+
+    const authorName = userManifesto?.authorName || 'Autor(a)';
+    const writerInst = userManifesto?.writerInstructions || '';
+    const humanizerInst = userManifesto?.humanizerInstructions || '';
+
+    const systemPrompt = `Você é ${authorName}, escrevendo para o blog "${blogName || 'Blog'}" (nicho: ${blogNiche || 'editorial'}).
+
+Um crítico leu o seu artigo e apontou os problemas abaixo. Você vai corrigir ESTES problemas e mais nenhum.
+
+REGRA QUE NÃO SE NEGOCIA
+- Não reescreva parágrafo que não foi apontado. Se o crítico não reclamou, está bom.
+- Não "melhore" o estilo por conta própria. Cada frase que você troca sem motivo apontado é a sua voz sendo substituída pela média.
+- Preserve isto acima de tudo: ${strongestPoint || 'a tese central do artigo'}
+- O texto não abre repetindo o título como H1.
+${writerInst ? `\nCOMO VOCÊ ESCREVE:\n${writerInst}` : ''}
+${humanizerInst ? `\nVÍCIOS QUE VOCÊ NÃO COMETE:\n${humanizerInst}` : ''}
+
+Se um problema apontado exigir um fato que você não tem, não invente: reescreva o trecho para não depender dele, e registre isso em "unresolved".`;
+
+    const problemList = list
+      .map(
+        (p: any, i: number) =>
+          `${i + 1}. [${p.severity || 'medio'} · ${p.area || 'geral'}] ${p.what}\n` +
+          `   Onde: "${p.where}"\n` +
+          `   Por quê: ${p.why}\n` +
+          `   O que fazer: ${p.fix}`
+      )
+      .join('\n\n');
+
+    const userPrompt = `TÍTULO: ${title}
+SUBTÍTULO: ${subtitle}
+
+PROBLEMAS A CORRIGIR (só estes):
+${problemList}
+
+ARTIGO ATUAL:
+${text}`;
+
+    const repairSchema = {
+      type: Type.OBJECT,
+      properties: {
+        revisedTitle: { type: Type.STRING },
+        revisedSubtitle: { type: Type.STRING },
+        revisedText: { type: Type.STRING, description: 'O artigo corrigido em Markdown, sem H1 de título.' },
+        changeLog: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Uma linha por problema, dizendo o que foi feito.',
+        },
+        unresolved: {
+          type: Type.ARRAY,
+          items: { type: Type.STRING },
+          description: 'Problemas que não deu para resolver sem inventar fato. Vazio se não houver.',
+        },
+      },
+      required: ['revisedTitle', 'revisedSubtitle', 'revisedText', 'changeLog'],
+    };
+
+    const repairCall = (mName: string) =>
+      ai.models.generateContent({
+        model: mName,
+        contents: userPrompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: repairSchema,
+        },
+      });
+
+    const response = await runModelStep('writer', repairCall, { label: 'Reparo pós-crítica' });
+    const parsed = JSON.parse(response.text || '{}');
+
+    res.json({ success: true, data: parsed });
+  } catch (error: any) {
+    console.error('Error applying critique:', error);
+    res.status(500).json({ success: false, error: error.message || 'Falha ao aplicar a crítica.' });
+  }
+});
+
 // 3. GERADOR DE IMAGEM EDITORIAL
 app.post('/api/generate-image', async (req, res) => {
   try {
@@ -1387,8 +1648,10 @@ const STATUS_TO_STATE: Record<string, string> = {
   researching: 'researching',
   drafting: 'drafting',
   reviewing: 'reviewing',
+  auditing: 'auditing',
   generating_image: 'imaging',
   completed: 'ready',
+  rejected: 'rejected',
   error: 'failed',
 };
 const STATE_TO_STATUS: Record<string, string> = Object.fromEntries(
@@ -1442,6 +1705,7 @@ function jobRowToArticle(row: any) {
         updatedAt: row.updated_at,
         draft: payloads.draft,
         review: payloads.review,
+        audit: payloads.audit,
         image: payloads.image,
         factCheck: payloads.factcheck ?? undefined,
         tone: '',

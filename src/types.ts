@@ -79,6 +79,63 @@ export interface ReviewResult {
   readingTimeMinutes: number;
 }
 
+/**
+ * Um problema apontado pelo crítico, já ranqueado.
+ *
+ * A ordem importa mais que o conteúdo: o checklist limita quantos problemas o
+ * redator acata, justamente para que a crítica não apague a voz do autor a
+ * força de correção. Sem ranqueamento não existe "os três primeiros".
+ */
+export interface CritiqueProblem {
+  /** 1 é o mais grave. O crítico é obrigado a ordenar. */
+  rank: number;
+  severity: 'grave' | 'medio' | 'leve';
+  /** Que tipo de falha: 'argumento', 'evidencia', 'voz', 'estrutura', 'precisao'. */
+  area: string;
+  /** O problema em uma frase. */
+  what: string;
+  /** Trecho citado do artigo, para o reparo ter endereço. */
+  where: string;
+  /** Por que isso é problema para este leitor, deste blog. */
+  why: string;
+  /** O que fazer. Não é o texto novo — é a instrução. */
+  fix: string;
+}
+
+export interface CritiqueResult {
+  /** 0 a 10. Lido por código, não interpretado. */
+  score: number;
+  /** O crítico publicaria isto com o nome do autor? */
+  wouldPublish: boolean;
+  problems: CritiqueProblem[];
+  /** O que o artigo tem de melhor — o reparo não pode destruir isto. */
+  strongestPoint: string;
+  /** Uma frase sobre o texto como um todo. */
+  verdict: string;
+}
+
+/**
+ * O resultado da triagem inteira: o que o código mediu e o que o crítico julgou.
+ *
+ * `passed` é o único campo que o worker precisa ler. Prosa não veta.
+ */
+export interface AuditReport {
+  passed: boolean;
+  /** Média das duas notas, para ranquear a fila de aprovação. */
+  score: number;
+  deterministic: {
+    passed: boolean;
+    score: number;
+    findings: Array<{ code: string; severity: 'veto' | 'aviso'; message: string; evidence: string[] }>;
+    metrics: Record<string, number>;
+  };
+  critique?: CritiqueResult;
+  /** Quantas vezes o texto voltou para o redator com a crítica em mãos. */
+  repairs: number;
+  /** Por que reprovou, em uma linha, para a caixa de entrada. */
+  reason?: string;
+}
+
 export interface ImageResult {
   imageUrl: string;
   promptUsed: string;
@@ -147,7 +204,17 @@ export interface ArticlePost {
   review?: ReviewResult;
   image?: ImageResult;
   derivedFormats?: DerivedFormats;
-  status: 'researching' | 'drafting' | 'reviewing' | 'generating_image' | 'completed' | 'error';
+  audit?: AuditReport;
+  status:
+    | 'researching'
+    | 'drafting'
+    | 'reviewing'
+    | 'auditing'
+    | 'generating_image'
+    | 'completed'
+    | 'error'
+    /** Chegou ao fim e a triagem reprovou. Não é erro: é resultado. */
+    | 'rejected';
   isPublished?: boolean;
   publishedAt?: string;
   /** Slug com que o artigo foi para o blog. Existe = está publicado no Supabase.

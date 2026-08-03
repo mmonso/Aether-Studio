@@ -325,7 +325,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
 
   const handleDownloadPDF = () => {
 
-    const authorName = manifesto.authorName || post.authorName || 'Psicólogo(a)';
+    const authorName = manifesto.authorName || post.authorName || 'Autor(a)';
     const professionalTitle = manifesto.professionalTitle || 'Tecnologia & Engenharia de Software';
     const title = editedTitle || post.review?.revisedTitle || post.draft?.title || post.topic;
     const subtitle = editedSubtitle || post.review?.revisedSubtitle || post.draft?.subtitle || '';
@@ -1586,7 +1586,7 @@ export const ArticleResultView: React.FC<ArticleResultViewProps> = ({
                       {/* Core Narrative */}
                       <div className="space-y-2">
                         <span className="text-[10px] font-bold text-stone-400 uppercase tracking-widest block">
-                          🎙️ Fala Principal do Psicólogo (Prosa Ensaística Contínua):
+                          🎙️ Fala Principal de {manifesto.professionalTitle || manifesto.authorName || 'quem assina'} (Prosa Ensaística Contínua):
                         </span>
                         <p className="p-4 bg-stone-800/80 rounded-2xl text-xs sm:text-sm text-stone-200 leading-relaxed font-sans whitespace-pre-wrap border border-stone-700">
                           {derivedFormats.reelsScript.coreNarrative}
@@ -1975,7 +1975,7 @@ export const ArticlePostComponent: React.FC<ArticleProps> = ({
   subtitle = ${JSON.stringify(displayedSubtitle)},
   publishedAt = "${new Date(post.createdAt).toLocaleDateString('pt-BR', { day: '2-digit', month: 'long', year: 'numeric' })}",
   readTimeMinutes = ${post.review?.readingTimeMinutes || 4},
-  authorName = ${JSON.stringify(manifesto.authorName || 'Psicólogo(a)')},
+  authorName = ${JSON.stringify(manifesto.authorName || 'Autor(a)')},
   coverImageUrl = ${JSON.stringify(displayedCoverUrl)},
   tags = ${JSON.stringify(post.tags || post.review?.suggestedTags || ['Tecnologia', 'Artigo'])},
 }) => {
@@ -2061,7 +2061,7 @@ export default ArticlePostComponent;`;
                       .replace(/(^-|-$)/g, ''),
                     title: displayedTitle,
                     subtitle: displayedSubtitle,
-                    author: manifesto.authorName || 'Psicólogo(a)',
+                    author: manifesto.authorName || 'Autor(a)',
                     publishedAt: new Date(post.createdAt).toISOString(),
                     readingTimeMinutes: post.review?.readingTimeMinutes || 4,
                     coverImageUrl: displayedCoverUrl,
@@ -2090,7 +2090,7 @@ export default ArticlePostComponent;`;
                 codeText = `---
 title: ${JSON.stringify(displayedTitle)}
 subtitle: ${JSON.stringify(displayedSubtitle)}
-author: ${JSON.stringify(manifesto.authorName || 'Psicólogo(a)')}
+author: ${JSON.stringify(manifesto.authorName || 'Autor(a)')}
 date: "${new Date(post.createdAt).toISOString().split('T')[0]}"
 readingTimeMinutes: ${post.review?.readingTimeMinutes || 4}
 coverImageUrl: ${JSON.stringify(displayedCoverUrl)}
@@ -2116,7 +2116,7 @@ ${displayedText}
                 codeText = `<article class="article">
   <h1>${displayedTitle}</h1>
   ${displayedSubtitle ? `<p class="subtitle"><em>${displayedSubtitle}</em></p>` : ''}
-  <p class="meta">Por ${manifesto.authorName || 'Psicólogo(a)'} • ${new Date(post.createdAt).toLocaleDateString('pt-BR')} • ${post.review?.readingTimeMinutes || 4} min de leitura</p>
+  <p class="meta">Por ${manifesto.authorName || 'Autor(a)'} • ${new Date(post.createdAt).toLocaleDateString('pt-BR')} • ${post.review?.readingTimeMinutes || 4} min de leitura</p>
   ${displayedCoverUrl ? `<img src="${displayedCoverUrl}" alt="${displayedTitle}" referrerpolicy="no-referrer" />` : ''}
   <div class="article-body">
     ${displayedText

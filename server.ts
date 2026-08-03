@@ -108,6 +108,18 @@ interface AiUsage {
    * morta a execução inteira.
    */
   quotaExhausted: boolean;
+  /**
+   * A busca com grounding ficou indisponível, mas a geração comum não.
+   *
+   * O Google Search tem cota PRÓPRIA e bem menor que a de `generateContent`
+   * no free tier: dá para escrever artigos o dia inteiro com a busca já
+   * esgotada. Verificado em 03/08/2026 — geração HTTP 200, grounding HTTP 429,
+   * mesma chave, mesmo minuto.
+   *
+   * Sem esta distinção, a falta de grounding derrubava a execução inteira do
+   * worker, embora redação, revisão e imagem não dependam de busca nenhuma.
+   */
+  groundingUnavailable: boolean;
 }
 
 const aiUsageStore = new AsyncLocalStorage<AiUsage>();
@@ -158,8 +170,9 @@ async function callGeminiWithRetry<T>(
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         delayMs *= 2;
       } else {
-        // Esgotou as tentativas num 429: não é congestionamento momentâneo.
-        if (kind === 'rate-limit' && usage) usage.quotaExhausted = true;
+        // Quem decide se isto é "cota morta" é o `runModelStep`, que sabe se a
+        // etapa era essencial ou opcional. Marcar aqui derrubava a produção
+        // inteira quando só o grounding tinha acabado.
         throw error;
       }
     }
@@ -177,29 +190,65 @@ async function callGeminiWithRetry<T>(
 async function runModelStep<T>(
   role: ModelRole,
   call: (modelName: string) => Promise<T>,
-  options: { label: string; retries?: number; delayMs?: number } = { label: role }
+  options: {
+    label: string;
+    retries?: number;
+    delayMs?: number;
+    /**
+     * Etapa que o sistema sabe viver sem — hoje, as duas que usam
+     * `googleSearch`. Cota estourada aqui NÃO significa cota estourada em
+     * geral: o grounding tem cota própria e muito menor. Marcar como opcional
+     * evita que a falta de busca derrube a produção inteira, e encurta a
+     * insistência, que seria desperdício.
+     */
+    optional?: boolean;
+  } = { label: role }
 ): Promise<T> {
   const { primary, fallback } = MODELS[role];
   const usage = currentUsage();
   const mode = usage?.mode ?? DEFAULT_FALLBACK_MODE;
-  const { label, retries, delayMs } = options;
+  const { label, retries, delayMs, optional } = options;
+
+  const markQuota = () => {
+    if (!usage) return;
+    if (optional) usage.groundingUnavailable = true;
+    else usage.quotaExhausted = true;
+  };
 
   try {
-    return await callGeminiWithRetry(() => call(primary), retries, delayMs);
+    // Etapa opcional não insiste: uma tentativa curta e segue sem ela.
+    return await callGeminiWithRetry(
+      () => call(primary),
+      optional ? 1 : retries,
+      delayMs
+    );
   } catch (firstError: any) {
-    if (mode === 'wait') {
-      // Sem pressa: insiste no modelo bom com uma janela bem maior em vez de
-      // rebaixar. Se falhar de novo, o job sobe o erro e retoma depois — que é
-      // o comportamento certo para uma fila noturna.
-      console.warn(
-        `[${label}] ${primary} indisponível. Modo 'wait': nova tentativa em janela longa, sem rebaixar.`
-      );
-      return await callGeminiWithRetry(() => call(primary), 3, 30_000);
+    if (optional) {
+      if (isRetryable(firstError) === 'rate-limit') markQuota();
+      console.warn(`[${label}] indisponível e opcional — seguindo sem esta etapa.`);
+      throw firstError;
     }
 
-    console.warn(`[${label}] ${primary} indisponível. Rebaixando para ${fallback}.`);
-    if (usage) usage.degraded.push({ model: fallback, insteadOf: primary });
-    return await callGeminiWithRetry(() => call(fallback), retries, delayMs);
+    try {
+      if (mode === 'wait') {
+        // Sem pressa: insiste no modelo bom com uma janela bem maior em vez de
+        // rebaixar. Se falhar de novo, o job sobe o erro e retoma depois — que é
+        // o comportamento certo para uma fila noturna.
+        console.warn(
+          `[${label}] ${primary} indisponível. Modo 'wait': nova tentativa em janela longa, sem rebaixar.`
+        );
+        return await callGeminiWithRetry(() => call(primary), 3, 30_000);
+      }
+
+      console.warn(`[${label}] ${primary} indisponível. Rebaixando para ${fallback}.`);
+      if (usage) usage.degraded.push({ model: fallback, insteadOf: primary });
+      return await callGeminiWithRetry(() => call(fallback), retries, delayMs);
+    } catch (lastError: any) {
+      // Etapa ESSENCIAL que esgotou tudo com 429: aí sim é cota morta, e a
+      // execução do worker inteira deve parar.
+      if (isRetryable(lastError) === 'rate-limit') markQuota();
+      throw lastError;
+    }
   }
 }
 
@@ -219,6 +268,7 @@ app.use((req, res, next) => {
     retries: 0,
     degraded: [],
     quotaExhausted: false,
+    groundingUnavailable: false,
     mode: req.get('x-aether-mode') === 'auto' ? 'wait' : DEFAULT_FALLBACK_MODE,
   };
 
@@ -328,7 +378,7 @@ Priorize o recente sobre o consagrado. Não complete lacunas com conhecimento pr
               tools: [{ googleSearch: {} }],
             },
           }),
-        { label: 'Tópicos/busca' }
+        { label: 'Tópicos/busca', optional: true }
       );
 
       trendsDigest = searchResponse.text || '';
@@ -502,7 +552,7 @@ REGRAS:
               tools: [{ googleSearch: {} }],
             },
           }),
-        { label: 'Fact-check/busca' }
+        { label: 'Fact-check/busca', optional: true }
       );
 
       researchText = searchResponse.text || '';

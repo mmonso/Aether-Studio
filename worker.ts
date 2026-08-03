@@ -32,11 +32,24 @@ import {
 
 const JOBS_TABLE = 'article_jobs';
 
+/**
+ * Lê número de variável de ambiente respeitando o ZERO.
+ *
+ * `Number(x) || padrao` trata 0 como ausente: `WORKER_MAX_JOBS=0` caía no
+ * padrão 3 e processava a fila mesmo quando a intenção era só planejar.
+ */
+function envNumber(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (raw === undefined || raw === '') return fallback;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
 /** Quantos artigos por execução. Baixo de propósito: ver PACING abaixo. */
-const MAX_JOBS = Number(process.env.WORKER_MAX_JOBS) || 3;
+const MAX_JOBS = envNumber('WORKER_MAX_JOBS', 3);
 
 /** Desistir de um job depois de N tentativas, para não queimar cota em loop. */
-const MAX_ATTEMPTS = Number(process.env.WORKER_MAX_ATTEMPTS) || 3;
+const MAX_ATTEMPTS = envNumber('WORKER_MAX_ATTEMPTS', 3);
 
 /**
  * PACING — a pausa entre artigos.
@@ -45,10 +58,10 @@ const MAX_ATTEMPTS = Number(process.env.WORKER_MAX_ATTEMPTS) || 3;
  * por dia. E o worker tem a noite inteira: não há motivo para disparar tudo de
  * uma vez e bater no teto. Rate limit deixa de ser erro e vira ritmo.
  */
-const PACE_BETWEEN_JOBS_MS = Number(process.env.WORKER_PACE_MS) || 20_000;
+const PACE_BETWEEN_JOBS_MS = envNumber('WORKER_PACE_MS', 20_000);
 
 /** Teto de chamadas de IA por execução. Freio bruto, mas existe desde o dia 1. */
-const MAX_AI_CALLS = Number(process.env.WORKER_MAX_AI_CALLS) || 60;
+const MAX_AI_CALLS = envNumber('WORKER_MAX_AI_CALLS', 60);
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -89,6 +102,7 @@ let aiCallsThisRun = 0;
  * estão e a próxima execução agendada os retoma, sem perder etapa paga.
  */
 let quotaExhausted = false;
+let groundingWarned = false;
 
 function looksLikeQuotaExhaustion(message: unknown): boolean {
   const text = String(message || '');
@@ -130,10 +144,22 @@ function makeCallApi(baseUrl: string): CallApi {
 
     // O sinal vem do servidor, da camada de retentativa, e não da mensagem de
     // erro: alguns handlers engolem o 429 de propósito e respondem
-    // `success: true` degradado — a busca do gerador de pautas é um deles.
-    // Olhar só a resposta deixaria o worker insistir contra uma cota morta.
+    // `success: true` degradado.
+    //
+    // `quotaExhausted` só é levantado por etapa ESSENCIAL. Grounding esgotado
+    // vira `groundingUnavailable` e não derruba nada: a busca do Google tem
+    // cota própria e muito menor, então dá para escrever o dia inteiro com ela
+    // já no fim. A primeira versão disto abortava a produção por falta de
+    // busca, com a geração intacta.
     if (json?.aiUsage?.quotaExhausted || looksLikeQuotaExhaustion(json?.error)) {
       quotaExhausted = true;
+    }
+    if (json?.aiUsage?.groundingUnavailable && !groundingWarned) {
+      groundingWarned = true;
+      console.warn(
+        'worker: busca com grounding indisponível (cota própria, menor que a de ' +
+          'geração). Os artigos saem sem apuração ao vivo — sem selo de verificação.'
+      );
     }
 
     return json;
@@ -198,6 +224,13 @@ async function runJob(job: JobRow, baseUrl: string) {
   const { blog, manifesto } = await loadBlogContext(job.blog_id);
   const callApi = makeCallApi(baseUrl);
 
+  // `aiCallsThisRun` é da EXECUÇÃO inteira, não deste job. Sem esta marca, o
+  // segundo artigo herdava as chamadas do primeiro — o job 2 aparecia com 11
+  // chamadas tendo gastado 5. E `ai_calls` é justamente o número que vai
+  // alimentar o teto mensal por blog.
+  const callsBeforeJob = aiCallsThisRun;
+  const jobCalls = () => job.ai_calls + (aiCallsThisRun - callsBeforeJob);
+
   // Payloads já pagos numa tentativa anterior. É isto que evita repagar.
   const previous: StepPayloads = job.step_payloads?.payloads || {};
   const resumedFrom = Object.keys(previous).filter((k) => previous[k as keyof StepPayloads]);
@@ -224,7 +257,7 @@ async function runJob(job: JobRow, baseUrl: string) {
           state: STEP_STATE[step] || job.state,
           last_completed_step: step,
           step_payloads: { payloads },
-          ai_calls: job.ai_calls + aiCallsThisRun,
+          ai_calls: jobCalls(),
         });
       },
     });
@@ -258,7 +291,7 @@ async function runJob(job: JobRow, baseUrl: string) {
     await updateJob(job.id, {
       state: 'ready',
       step_payloads: { payloads },
-      ai_calls: job.ai_calls + aiCallsThisRun,
+      ai_calls: jobCalls(),
       error: null,
     });
 
@@ -275,7 +308,7 @@ async function runJob(job: JobRow, baseUrl: string) {
       state: isQuota ? 'queued' : 'failed',
       attempts: isQuota ? job.attempts : job.attempts + 1,
       step_payloads: { payloads },
-      ai_calls: job.ai_calls + aiCallsThisRun,
+      ai_calls: jobCalls(),
       error: isQuota ? 'Cota de IA esgotada — reenfileirado.' : `[${step}] ${err?.message || err}`,
     });
 

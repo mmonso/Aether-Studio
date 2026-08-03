@@ -56,6 +56,15 @@ export interface AuditPolicy {
   problemsPerRepair: number;
   /** Reprovado no fim das tentativas: falha o job ou entrega marcado? */
   rejectOnFailure: boolean;
+  /**
+   * Artigo sem apuração — ou com apuração fraca — é reprovado de saída.
+   *
+   * Desligado por padrão, e isso é uma decisão consciente, não um esquecimento:
+   * a busca do Google tem cota própria e muito menor que a de geração, então
+   * ligar isto hoje reprovaria praticamente tudo. O mecanismo fica pronto para
+   * o dia em que a cota de busca deixar de ser o gargalo.
+   */
+  requireSources: boolean;
 }
 
 export const DEFAULT_AUDIT_POLICY: AuditPolicy = {
@@ -64,6 +73,7 @@ export const DEFAULT_AUDIT_POLICY: AuditPolicy = {
   maxRepairs: 1,
   problemsPerRepair: 3,
   rejectOnFailure: true,
+  requireSources: false,
 };
 
 export interface PipelineContext {
@@ -219,6 +229,21 @@ async function runAudit(
 
   for (;;) {
     const deterministic = auditText(review.revisedText, ctx.manifesto);
+
+    if (policy.requireSources) {
+      const semApuracao = !factCheck || !factCheck.groundingUsed;
+      if (semApuracao || factCheck?.weak) {
+        deterministic.findings.push({
+          code: 'sem-apuracao',
+          severity: 'veto',
+          message: semApuracao
+            ? 'O artigo foi escrito sem nenhuma apuração com fontes.'
+            : `Apuração insuficiente: ${factCheck?.weakReason}.`,
+          evidence: [],
+        });
+        deterministic.passed = false;
+      }
+    }
 
     if (repairs > 0) {
       const invented = detectInventedNumbers(review.revisedText, baseline, evidence);

@@ -51,6 +51,16 @@ export interface FactCheckReport {
   groundingUsed: boolean;
   checkedAt: string;
   verdict: string;
+  /**
+   * Houve apuração, mas ela não sustenta um artigo: poucas fontes ou
+   * confiabilidade baixa.
+   *
+   * O dossiê continua vindo em vez de virar erro — ele já foi pago e diz algo
+   * útil. Quem decide o que fazer com uma apuração fraca é a política de
+   * triagem (`AuditPolicy.requireSources`), não a etapa de pesquisa.
+   */
+  weak?: boolean;
+  weakReason?: string;
 }
 
 export interface DraftResult {

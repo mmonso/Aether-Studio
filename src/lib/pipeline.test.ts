@@ -332,6 +332,53 @@ test('número que veio da apuração não é tratado como invenção', async () 
   assert.equal(payloads.audit?.passed, true);
 });
 
+test('com apuração exigida, artigo sem fonte é reprovado antes de qualquer nota', async () => {
+  const { callApi } = recorder({
+    '/api/critique-draft': () => critique({ score: 10, wouldPublish: true }),
+  });
+
+  await assert.rejects(
+    () =>
+      runPipeline({
+        context: { ...context, audit: { requireSources: true, maxRepairs: 0 } },
+        callApi,
+        payloads: { ...done },
+      }),
+    (err: any) => {
+      assert.ok(err instanceof PipelineRejection);
+      assert.ok(err.report.reason?.includes('sem-apuracao'));
+      return true;
+    }
+  );
+});
+
+test('apuração declarada fraca também reprova quando as fontes são exigidas', async () => {
+  const { callApi } = recorder({
+    '/api/critique-draft': () => critique({ score: 10, wouldPublish: true }),
+  });
+
+  await assert.rejects(
+    () =>
+      runPipeline({
+        context: { ...context, audit: { requireSources: true, maxRepairs: 0 } },
+        callApi,
+        payloads: {
+          ...done,
+          factcheck: {
+            groundingUsed: true,
+            weak: true,
+            weakReason: 'só 1 fonte consultada',
+          } as any,
+        },
+      }),
+    (err: any) => {
+      assert.ok(err instanceof PipelineRejection);
+      assert.ok(err.report.reason?.includes('sem-apuracao'));
+      return true;
+    }
+  );
+});
+
 test('a triagem desligada não gasta chamada nenhuma', async () => {
   const { callApi, countOf } = recorder({
     '/api/generate-image': () => ({ success: true, data: { imageUrl: 'x' } }),

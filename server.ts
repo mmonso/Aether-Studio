@@ -474,6 +474,16 @@ ${trendContext}`;
 // de combinar os dois fazia toda apuração cair silenciosamente para um modelo
 // sem acesso à web, respondendo de memória.
 
+/**
+ * Abaixo disto a apuração é declarada fraca.
+ *
+ * Uma fonte só não é apuração — é repetir o que um site disse. E uma nota de
+ * confiabilidade baixa vinda do próprio checador é confissão de que o material
+ * não sustenta o artigo.
+ */
+const MIN_SOURCES = Number(process.env.FACTCHECK_MIN_SOURCES || 2);
+const MIN_CREDIBILITY = Number(process.env.FACTCHECK_MIN_CREDIBILITY || 50);
+
 interface GroundingSource {
   title: string;
   sourceName: string;
@@ -649,21 +659,39 @@ ${groundingSources.map((s) => `- ${s.sourceName}: ${s.title}`).join('\n')}`;
       });
     }
 
+    const credibility =
+      typeof parsed.credibilityScore === 'number'
+        ? Math.max(0, Math.min(100, parsed.credibilityScore))
+        : null;
+
+    // Apuração fraca é declarada, não escondida. O dossiê já foi pago e ainda
+    // serve para o crítico; o que muda é que a triagem passa a saber que este
+    // artigo não tem chão factual. Quem barra é a política, não esta etapa.
+    const weakReasons: string[] = [];
+    if (groundingSources.length < MIN_SOURCES) {
+      weakReasons.push(`só ${groundingSources.length} fonte(s) consultada(s)`);
+    }
+    if (credibility !== null && credibility < MIN_CREDIBILITY) {
+      weakReasons.push(`confiabilidade ${credibility}%`);
+    }
+    if (!Array.isArray(parsed.verifiedFacts) || parsed.verifiedFacts.length === 0) {
+      weakReasons.push('nenhum fato confirmado');
+    }
+
     res.json({
       success: true,
       data: {
         researchSummary: parsed.researchSummary,
         // Sem default: a nota vem da apuração ou não existe.
-        credibilityScore:
-          typeof parsed.credibilityScore === 'number'
-            ? Math.max(0, Math.min(100, parsed.credibilityScore))
-            : null,
+        credibilityScore: credibility,
         verifiedFacts: parsed.verifiedFacts,
         unverifiedClaimsOrRumors: parsed.unverifiedClaimsOrRumors || [],
         sources: groundingSources,
         groundingUsed: true,
         checkedAt: new Date().toISOString(),
         verdict: parsed.verdict || 'Informação Parcial ou em Atualização',
+        weak: weakReasons.length > 0,
+        weakReason: weakReasons.length > 0 ? weakReasons.join('; ') : undefined,
       },
     });
   } catch (error: any) {
@@ -724,9 +752,20 @@ ${Array.isArray(factCheck.verifiedFacts) ? factCheck.verifiedFacts.map((f: strin
 BOATOS OU DADOS NÃO CONFIRMADOS A EVITAR RIGOROSAMENTE:
 ${Array.isArray(factCheck.unverifiedClaimsOrRumors) ? factCheck.unverifiedClaimsOrRumors.map((r: string) => `- ${r}`).join('\n') : 'Nenhum boato relevante identificado.'}
 
-FONTES VERIFICADAS DE REFERÊNCIA:
-${Array.isArray(factCheck.sources) ? factCheck.sources.map((s: any) => `- ${s.sourceName}: "${s.title}"`).join('\n') : ''}
+FONTES VERIFICADAS DE REFERÊNCIA (use os endereços abaixo para linkar):
+${Array.isArray(factCheck.sources) ? factCheck.sources.map((s: any) => `- ${s.sourceName}: "${s.title}"${s.url ? ` → ${s.url}` : ''}`).join('\n') : ''}
+
 ATENÇÃO: Você DEVE basear o artigo rigorosamente nestes fatos verificados acima, citando contextualização e dados reais sem alterar a verdade dos fatos.
+
+COMO CITAR — não é opcional:
+- Toda afirmação que veio de uma fonte leva o link em Markdown no próprio texto,
+  na palavra que faz sentido clicar: [o relatório da Cloudflare](URL). Nunca uma
+  lista de links no fim, nunca "segundo fontes".
+- Use SOMENTE os endereços listados acima. Não escreva URL de memória: endereço
+  inventado é pior que fonte nenhuma, porque parece verificável.
+- Número, data ou versão que não esteja nos fatos apurados acima simplesmente não
+  entra no artigo. Se o argumento precisa de um dado que você não tem, reescreva
+  o argumento — não estime, não arredonde, não ilustre com valor plausível.
 `
       : '';
 
@@ -849,7 +888,12 @@ app.post('/api/review-draft', async (req, res) => {
 - Dossiê de Fact-Checking: Confiabilidade de ${factCheck.credibilityScore}% (${factCheck.verdict})
 - Fatos Confirmados: ${Array.isArray(factCheck.verifiedFacts) ? factCheck.verifiedFacts.join('; ') : ''}
 - Boatos a Impedir: ${Array.isArray(factCheck.unverifiedClaimsOrRumors) ? factCheck.unverifiedClaimsOrRumors.join('; ') : ''}
-- Exigência: Auditar se o texto não inventou fatos adicionais, não propagou boatos e citou as informações apuradas com exatidão factual.`
+- Fontes disponíveis para citação: ${Array.isArray(factCheck.sources) ? factCheck.sources.map((s: any) => `${s.sourceName}${s.url ? ` (${s.url})` : ''}`).join('; ') : '—'}
+- Exigência: Auditar se o texto não inventou fatos adicionais, não propagou boatos e citou as informações apuradas com exatidão factual.
+- O REDATOR PRINCIPAL reescreve o artigo do zero, e é exatamente aí que os links
+  costumam sumir: PRESERVE todo link em Markdown que já exista no rascunho. Se um
+  link não couber na frase reescrita, refaça a frase — não descarte a fonte.
+- Não crie URL nova. Só os endereços listados acima existem.`
       : '';
 
     const systemPrompt = `Você opera como um COMITÊ EDITORIAL E DE REDAÇÃO SÊNIOR para o blog "${bName}" (Nicho: ${bNiche}), do(a) autor(a) ${authorName}.
@@ -1154,7 +1198,13 @@ REGRA QUE NÃO SE NEGOCIA
 - Não reescreva parágrafo que não foi apontado. Se o crítico não reclamou, está bom.
 - Não "melhore" o estilo por conta própria. Cada frase que você troca sem motivo apontado é a sua voz sendo substituída pela média.
 - Preserve isto acima de tudo: ${strongestPoint || 'a tese central do artigo'}
+- Preserve todos os links em Markdown que já existem. Eles são a apuração do artigo.
 - O texto não abre repetindo o título como H1.
+- NÃO INVENTE DADO. Se um problema apontado pede número, benchmark, data ou versão
+  que não está no texto atual, você não tem essa informação. Reescreva o trecho
+  para não depender dela e registre em "unresolved". Um número plausível que você
+  criou é a pior coisa que pode sair daqui — e existe uma verificação automática
+  comparando os números antes e depois desta etapa, que vai reprovar o artigo.
 ${writerInst ? `\nCOMO VOCÊ ESCREVE:\n${writerInst}` : ''}
 ${humanizerInst ? `\nVÍCIOS QUE VOCÊ NÃO COMETE:\n${humanizerInst}` : ''}
 

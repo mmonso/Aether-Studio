@@ -11,7 +11,8 @@
     "lint": "tsc --noEmit",
     "worker": "tsx worker.ts",
     "build:worker": "esbuild worker.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/worker.cjs",
-    "test": "tsx --test src/**/*.test.ts"
+    "test": "tsx --test src/**/*.test.ts",
+    "audit:posts": "tsx scripts/audit-posts.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
